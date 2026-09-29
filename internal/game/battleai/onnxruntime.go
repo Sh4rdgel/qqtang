@@ -33,8 +33,7 @@ type ONNXRuntimeConfig struct {
 	InterOpThreads int
 }
 
-// ONNXRuntimeRunner executes the same decentralized actor contract as the
-// dependency-free NativeRunner. The underlying ORT session is safe for
+// ONNXRuntimeRunner executes the decentralized actor contract. The ORT session is safe for
 // concurrent inference; input and output tensors remain private to each call.
 type ONNXRuntimeRunner struct {
 	contract Contract

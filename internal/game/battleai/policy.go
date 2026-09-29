@@ -8,8 +8,8 @@ import (
 	"qqtang/internal/game/battleenv"
 )
 
-// LogitRunner is the narrow backend boundary. ONNX Runtime, a native compact
-// runner, and tests can implement it without learning any combat semantics.
+// LogitRunner is the narrow boundary used by ONNX Runtime and test doubles;
+// inference implementations do not own combat semantics.
 type LogitRunner interface {
 	RunActor(spatial []float32, scalars []float32, legal []uint8) ([]float32, error)
 }
@@ -35,6 +35,44 @@ type NeuralCandidates struct {
 	DecisionMS      uint32
 	memory          []float32
 	resetMemory     bool
+	// refuge holds, per action ID, whether the engine projection of the last
+	// encoded decision keeps a whole-cell refuge (see refugeActions).
+	refuge []bool
+}
+
+// Scalar layout written by battleenv.setTacticalConsequenceFeatures: whole-cell
+// refuge found per movement direction (stay, up, right, down, left) in the
+// current world and after placing a bubble; the latter only counts when the
+// bubble projection is valid.
+const (
+	bombProjectionValidScalar = 95
+	currentRefugeFoundScalar  = 162
+	bombRefugeFoundScalar     = 172
+	refugeDirections          = 5
+)
+
+// refugeActions marks stay/move (IDs 0..4) and bubble-plus-move (5..9)
+// actions whose projection keeps a refuge. Other actions (items) stay open.
+// The projection covers known danger, not future enemy play.
+func refugeActions(scalars []float32, actions int) []bool {
+	safe := make([]bool, actions)
+	for id := range safe {
+		safe[id] = true
+	}
+	if len(scalars) < bombRefugeFoundScalar+refugeDirections || actions < 2*refugeDirections {
+		return safe
+	}
+	for direction := 0; direction < refugeDirections; direction++ {
+		safe[direction] = scalars[currentRefugeFoundScalar+direction] > 0.5
+		safe[refugeDirections+direction] = scalars[bombRefugeFoundScalar+direction] > 0.5 &&
+			scalars[bombProjectionValidScalar] > 0.5
+	}
+	return safe
+}
+
+// lastRefugeActions is the refuge mask of the most recent decision.
+func (policy *NeuralCandidates) lastRefugeActions() []bool {
+	return policy.refuge
 }
 
 func (policy *NeuralCandidates) CandidateActions(
@@ -76,6 +114,9 @@ func (policy *NeuralCandidates) CandidateActionsWithSnapshot(
 	if err != nil {
 		return nil, err
 	}
+	// Schema 17 only appends terrain planes; keep existing model inputs intact.
+	encoded.Spatial = encoded.Spatial[:policy.Contract.Channels*policy.Contract.Height*policy.Contract.Width]
+	policy.refuge = refugeActions(encoded.ScalarValues, policy.Contract.Actions)
 	var logits []float32
 	if policy.Contract.RecurrentHiddenSize > 0 {
 		runner, ok := policy.Runner.(RecurrentLogitRunner)

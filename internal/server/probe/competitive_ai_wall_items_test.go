@@ -41,20 +41,24 @@ func TestCompetitiveGameDataCountsVirtualAIForMultiplayerWallItems(t *testing.T)
 		if err != nil {
 			t.Fatal(err)
 		}
-		// Eight actors yield seven copies per base category before two are
-		// converted into their maximum-strength counterparts, regardless of
-		// whether seven, four or none of the participants are virtual AI.
+		// The eight-role roster uses the current 70% wall budget: 50 basic
+		// upgrades plus six maximum-strength upgrades. Human/AI identity
+		// must not change that allocation.
 		want := []game.GameItemType{
-			{ItemID: 1, Quantity: 5}, {ItemID: 2, Quantity: 5}, {ItemID: 3, Quantity: 5},
+			{ItemID: 1, Quantity: 19}, {ItemID: 2, Quantity: 17}, {ItemID: 3, Quantity: 14},
 			{ItemID: 6, Quantity: 2}, {ItemID: 7, Quantity: 2}, {ItemID: 8, Quantity: 2},
 		}
 		if len(data.Players) != 8 || !slices.Equal(data.NewItems, want) {
 			t.Fatalf("%d humans + %d AI: players=%d items=%+v, want %+v", humanCount, 8-humanCount, len(data.Players), data.NewItems, want)
 		}
-		// Training rolls from the full actor count. Live AI instead consumes
-		// the exact list already sent in GAME_BEGIN; both must place identical
-		// hidden pickups for the same native map and item seed.
-		training, err := battleengine.HiddenPickupsFromCompetitiveMap(selected, data.ItemSeed, len(participants))
+		// Offline games use the shared roster-based supply plan. Live AI
+		// consumes GAME_BEGIN; both must place identical hidden pickups.
+		roles := make([]uint16, len(participants))
+		for index, participant := range participants {
+			roles[index] = uint16(participant.RoleID)
+		}
+		plan := selected.PlanCompetitiveSupply(data.ItemSeed, roles, false)
+		training, err := battleengine.HiddenPickupsFromCompetitiveWallItems(selected, data.ItemSeed, plan.WallItems)
 		if err != nil {
 			t.Fatal(err)
 		}

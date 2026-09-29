@@ -7,33 +7,23 @@ import (
 	"qqtang/internal/game/battleengine"
 )
 
-// NativePolicyConfig describes the complete dependency-free server policy.
+// ActorPolicyConfig describes the server's actor-local policy wrapper.
 // Greedy actor inference is the deployment default so formal evaluation and
 // live execution use the same learned decisions. Bounded search remains an
 // explicit diagnostic/teacher option rather than an implicit safety layer.
-type NativePolicyConfig struct {
+// Live participants sample instead when the model's contract enables it
+// (Contract.Sampling); an enabled search takes precedence.
+type ActorPolicyConfig struct {
 	DangerHorizonMS uint32
 	DecisionMS      uint32
 	EnableSearch    bool
 	Search          battleengine.SearchConfig
 }
 
-// LoadNativePolicy constructs a server-ready policy from one QTAI artifact.
-// The returned policy owns immutable weights and is safe to share among every
-// virtual participant in a match; each participant still receives a separate
-// visibility-bounded observation from battleengine.Runtime.
-func LoadNativePolicy(modelPath string, config NativePolicyConfig) (battleengine.Policy, error) {
-	runner, err := LoadNativeRunner(modelPath)
-	if err != nil {
-		return nil, err
-	}
-	return buildActorPolicy(runner.Contract(), runner, config)
-}
-
 func buildActorPolicy(
 	contract Contract,
 	runner LogitRunner,
-	config NativePolicyConfig,
+	config ActorPolicyConfig,
 ) (battleengine.Policy, error) {
 	if err := contract.Validate(); err != nil {
 		return nil, fmt.Errorf("validate AI contract: %w", err)
@@ -52,24 +42,43 @@ func buildActorPolicy(
 type actorPolicyTemplate struct {
 	contract      Contract
 	runner        LogitRunner
-	config        NativePolicyConfig
+	config        ActorPolicyConfig
 	defaultMu     sync.Mutex
 	defaultPolicy battleengine.Policy
 }
 
-func (template *actorPolicyTemplate) NewActorPolicy() battleengine.Policy {
-	candidates := &NeuralCandidates{
+func (template *actorPolicyTemplate) newCandidates() *NeuralCandidates {
+	return &NeuralCandidates{
 		Contract:        template.contract,
 		Runner:          template.runner,
 		DangerHorizonMS: template.config.DangerHorizonMS,
 		DecisionMS:      template.config.DecisionMS,
 		resetMemory:     template.contract.RecurrentHiddenSize > 0,
 	}
+}
+
+func (template *actorPolicyTemplate) NewActorPolicy() battleengine.Policy {
+	candidates := template.newCandidates()
 	if !template.config.EnableSearch {
 		return battleengine.GreedyCandidatePolicy{Candidate: candidates}
 	}
 	return battleengine.TopKSearchPolicy{
 		Candidate: candidates, Config: template.config.Search,
+	}
+}
+
+// NewSeededActorPolicy is NewActorPolicy for a live participant: when the
+// contract enables sampling (and search is off) it samples near-best actions
+// from an actor-local generator seeded by the caller (match and player).
+func (template *actorPolicyTemplate) NewSeededActorPolicy(seed uint64) battleengine.Policy {
+	if !template.contract.Sampled() || template.config.EnableSearch {
+		return template.NewActorPolicy()
+	}
+	return SampledCandidatePolicy{
+		Candidate:   template.newCandidates(),
+		MinP:        template.contract.Sampling.MinP,
+		Temperature: template.contract.Sampling.Temperature,
+		Rand:        NewCandidateRand(seed),
 	}
 }
 

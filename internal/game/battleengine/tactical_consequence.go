@@ -35,10 +35,11 @@ var tacticalReachabilityHorizonsMS = [TacticalReachabilityHorizonCount]uint32{
 // is unresolved, not proof of danger: native play may wait for an old bubble
 // to disappear and then cross that cell before the newly placed one explodes.
 //
-// Every area is normalized by the public map cell count. Enemy aggregates are
-// additionally averaged across active enemies. This keeps the meaning stable
-// across map and team sizes without hiding the absolute player/team context
-// already present in the observation schema.
+// Areas are normalized by the current open-cell count (all map cells for a
+// terrain-traversing actor). Opening unrelated terrain can therefore change
+// the share without changing the reachable-cell count. Enemy aggregates are
+// averaged across active enemies with valid projections; neither these shares
+// nor their changes alone prove causal pressure or realized combat success.
 type TacticalConsequences struct {
 	CurrentKnownDangerReachable          [TacticalReachabilityHorizonCount]float32
 	BombKnownDangerReachable             [TacticalReachabilityHorizonCount]float32
@@ -442,7 +443,7 @@ func (engine *Engine) tacticalSafeReachabilityFromActor(
 				continue
 			}
 			tile := engine.grid.Cells[nextIndex]
-			if (tile.Kind != CellOpen && !traversesStatic[directionIndex]) ||
+			if ((!tile.PlayerPassable(worldDirection) || !engine.grid.Cells[currentIndex].PlayerExitPassable(worldDirection)) && !traversesStatic[directionIndex]) ||
 				(nextIndex != startIndex && blocked[nextIndex]) {
 				continue
 			}
@@ -515,7 +516,79 @@ func (engine *Engine) tacticalSafeReachabilityFromActor(
 	scratch.blocked = blocked
 	scratch.queue = queue[:0]
 	tacticalReachabilityScratchPool.Put(scratch)
+	// Entering a cell does not mean the native footprint is centred in it.
+	// A turn can still touch the bubble/wall behind the actor even though
+	// continuing into this same cell and then turning is legal. The cell graph
+	// has no edge for that first, within-cell motion; without this fallback it
+	// can reject the useful forward direction and prefer stepping backwards.
+	// Only add a physically walkable, time-accounted centring prefix. The
+	// recursive search starts exactly at the centre, so it cannot recurse again.
+	if !result.refugeFound && actor.Position != PositionAtCellCenter(start) {
+		for _, horizontalFirst := range [...]bool{true, false} {
+			centred, at, ok := engine.tacticalCentreStart(actor, startAtMS, maximumDeadline, timeline, horizontalFirst)
+			if !ok {
+				continue
+			}
+			extra := engine.tacticalSafeReachabilityFromActor(&centred, at, timeline, horizons, additionalBomb)
+			for i := range result.safeRatios {
+				// Each search is a conservative set estimate; max is a lower bound
+				// on their union, without double-counting overlapping cells.
+				if extra.safeRatios[i] > result.safeRatios[i] {
+					result.safeRatios[i] = extra.safeRatios[i]
+				}
+			}
+			if extra.refugeFound && (!result.refugeFound || extra.refugeAtMS < result.refugeAtMS) {
+				result.refugeFound, result.refugeAtMS = true, extra.refugeAtMS
+			}
+		}
+	}
 	return result
+}
+
+// tacticalCentreStart tries only two axis-aligned paths inside the current
+// cell, preserving native collision checks and charging their travel time.
+// It does not add waiting, wall traversal, bubble passage, or enemy foresight.
+func (engine *Engine) tacticalCentreStart(actor *Actor, startAtMS, deadlineMS uint32, timeline DangerTimeline, horizontalFirst bool) (Actor, uint32, bool) {
+	candidate := *actor
+	centre := PositionAtCellCenter(actor.Position.Cell())
+	at := startAtMS
+	for _, horizontal := range [...]bool{horizontalFirst, !horizontalFirst} {
+		delta := centre.Y - candidate.Position.Y
+		direction := DirectionDown
+		if horizontal {
+			delta = centre.X - candidate.Position.X
+			direction = DirectionRight
+		}
+		if delta == 0 {
+			continue
+		}
+		if delta < 0 {
+			delta = -delta
+			if horizontal {
+				direction = DirectionLeft
+			} else {
+				direction = DirectionUp
+			}
+		}
+		speed := engine.tacticalMinimumSpeed(&candidate, direction, deadlineMS)
+		if speed == 0 || !engine.tacticalStraightSegmentWalkable(&candidate, candidate.Position, direction, int(delta)) {
+			return candidate, at, false
+		}
+		travelMS := (uint32(delta)*1000 + speed - 1) / speed
+		if travelMS < engine.rules.TickMS {
+			travelMS = engine.rules.TickMS
+		}
+		at = saturatingAdd(at, travelMS)
+		if at > deadlineMS || !tacticalCellSafeDuring(timeline, actor.Position.Cell(), startAtMS, at) {
+			return candidate, at, false
+		}
+		if horizontal {
+			candidate.Position.X = centre.X
+		} else {
+			candidate.Position.Y = centre.Y
+		}
+	}
+	return candidate, at, true
 }
 
 // tacticalStraightSegmentWalkable is equivalent to movementSegmentWalkable
@@ -812,7 +885,7 @@ func (engine *Engine) actorThreatExpansion(
 func (engine *Engine) breakableThreatExpansion(current, counterfactual DangerTimeline) float32 {
 	total, expanded := 0, 0
 	for index, tile := range engine.grid.Cells {
-		if tile.Kind != CellBreakable {
+		if tile.Durability == 0 {
 			continue
 		}
 		total++

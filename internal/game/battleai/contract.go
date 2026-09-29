@@ -36,6 +36,24 @@ type Contract struct {
 	ONNXSHA256               string  `json:"onnx_sha256,omitempty"`
 	MaximumParityError       float64 `json:"maximum_parity_error"`
 	MeanParityError          float64 `json:"mean_parity_error"`
+	// Sampling is the live decoding rule shipped with the model, because what
+	// a min-p value does depends on how sharp that model's policy is. Absent
+	// or disabled keeps greedy play.
+	Sampling *SamplingConfig `json:"sampling,omitempty"`
+}
+
+// SamplingConfig lets each virtual player sample among its near-best actions
+// (see SampledCandidatePolicy): MinP is the fraction of the best action's
+// probability at Temperature (default 1) that another action must reach.
+type SamplingConfig struct {
+	Enabled     bool    `json:"enabled"`
+	MinP        float64 `json:"min_p"`
+	Temperature float64 `json:"temperature,omitempty"`
+}
+
+// Sampled reports whether the model asks for sampled live decoding.
+func (contract Contract) Sampled() bool {
+	return contract.Sampling != nil && contract.Sampling.Enabled
 }
 
 // LoadContract validates the inference boundary but deliberately does not pin
@@ -76,7 +94,7 @@ func (contract Contract) Validate() error {
 		return fmt.Errorf("AI contract version 1 cannot declare recurrent memory")
 	case contract.ContractVersion == 2 && contract.RecurrentHiddenSize <= 0:
 		return fmt.Errorf("AI contract version 2 requires recurrent memory")
-	case contract.Channels != battleenv.SpatialChannels:
+	case contract.Channels != battleenv.SpatialChannels && contract.Channels != battleenv.TerrainSpatialChannels && contract.Channels != battleenv.LegacySpatialChannels:
 		return fmt.Errorf("AI spatial channels %d, server expects %d", contract.Channels, battleenv.SpatialChannels)
 	case contract.Scalars != battleenv.ScalarFeatures:
 		return fmt.Errorf("AI scalar features %d, server expects %d", contract.Scalars, battleenv.ScalarFeatures)
@@ -84,6 +102,8 @@ func (contract Contract) Validate() error {
 		return fmt.Errorf("AI actions %d, server expects %d", contract.Actions, battleengine.DiscreteActionCount)
 	case contract.Height <= 0 || contract.Width <= 0:
 		return fmt.Errorf("AI tensor dimensions must be positive")
+	case contract.Sampled() && (contract.Sampling.MinP <= 0 || contract.Sampling.MinP > 1 || contract.Sampling.Temperature < 0):
+		return fmt.Errorf("AI sampling needs min_p within (0, 1] and a non-negative temperature")
 	}
 	return nil
 }

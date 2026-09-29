@@ -116,7 +116,7 @@ func TestVerifiedPickupDispatchUsesNativeBirdClockAndContactGuard(t *testing.T) 
 	if err := engine.ApplyVerifiedPickupDispatch(dispatchTime, []Pickup{pickup}); err != nil {
 		t.Fatal(err)
 	}
-	wantActivateAt := dispatchTime + 2_700 // 2400 ms bird flight + 300 ms AI visibility delay
+	wantActivateAt := dispatchTime + 2_600 // 2400 ms bird flight + 200 ms empirical live observation guard
 	if len(engine.pendingPickupDispatches) != 1 || engine.pendingPickupDispatches[0].ActivateAtMS != wantActivateAt {
 		t.Fatalf("pending dispatch = %+v, want activation %d", engine.pendingPickupDispatches, wantActivateAt)
 	}
@@ -162,7 +162,7 @@ func TestVerifiedPickupDispatchColumnTwoMatchesNativeFlightCoefficient(t *testin
 	if err := engine.ApplyVerifiedPickupDispatch(dispatchTime, []Pickup{pickup}); err != nil {
 		t.Fatal(err)
 	}
-	wantActivateAt := uint32(63_700) // 3400 ms bird flight + 300 ms AI visibility delay
+	wantActivateAt := uint32(63_600) // 3400 ms bird flight + 200 ms empirical live observation guard
 	if got := engine.pendingPickupDispatches[0].ActivateAtMS; got != wantActivateAt {
 		t.Fatalf("column-2 activation = %d, want %d", got, wantActivateAt)
 	}

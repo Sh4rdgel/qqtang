@@ -221,10 +221,12 @@ func TestTacticalConsequencesRespectActorFootprintAtWallBoundary(t *testing.T) {
 	config.Grid.Cells[0*int(config.Grid.Width)+1] = Tile{Kind: CellSolid}
 	engine := mustEngine(t, config)
 	engine.actors[0].Position.Y = CellSizePixels + 5
-	facts := tacticalFactsForTest(t, engine, 1)
-	if facts.BombEarliestWholeCellRefugeEstimate != 0 {
-		t.Fatalf("whole-cell route crossed a wall touched by the actor footprint: %+v", facts)
+	actor := engine.actors[0]
+	if engine.tacticalStraightSegmentWalkable(&actor, actor.Position, DirectionRight, int(CellSizePixels)) {
+		t.Fatal("direct horizontal segment crossed a wall touched by the actor footprint")
 	}
+	// A full route may now first finish centring in the lower cell, then turn.
+	// The native execution of that distinct path is covered by the recenter test.
 }
 
 func TestTacticalMinimumSpeedIncludesStatusExpiry(t *testing.T) {

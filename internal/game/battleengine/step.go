@@ -33,6 +33,10 @@ func (engine *Engine) Step(actions []Action) ([]Event, error) {
 	}
 	for index := range engine.actors {
 		playerID := engine.actors[index].PlayerID
+		if engine.actors[index].nativeHitPending {
+			delete(actionByPlayer, playerID)
+			continue
+		}
 		action, ok := actionByPlayer[playerID]
 		if !ok {
 			continue
@@ -71,7 +75,7 @@ func (engine *Engine) Step(actions []Action) ([]Event, error) {
 	var directionByActor [MaxParticipants]Direction
 	for index := range engine.actors {
 		actor := &engine.actors[index]
-		if actor.State != ActorActive {
+		if actor.State != ActorActive || actor.nativeHitPending || actor.nativeHumanMotion != nil {
 			continue
 		}
 		direction := actor.Facing
@@ -143,7 +147,7 @@ worldInteractions:
 	for index := range engine.actors {
 		actor := &engine.actors[index]
 		direction := directionByActor[index]
-		if actor.State != ActorActive || direction == DirectionNone {
+		if actor.State != ActorActive || actor.nativeHitPending || direction == DirectionNone {
 			continue
 		}
 		for _, event := range fieldEvents {
@@ -171,7 +175,10 @@ worldInteractions:
 	}
 movement:
 	for index := range engine.actors {
-		if engine.actors[index].State != ActorActive {
+		if engine.actors[index].State != ActorActive || engine.actors[index].nativeHitPending {
+			continue
+		}
+		if engine.advanceHumanMovement(&engine.actors[index], saturatingAdd(engine.elapsedMS, engine.rules.TickMS)) {
 			continue
 		}
 		for _, event := range fieldEvents {

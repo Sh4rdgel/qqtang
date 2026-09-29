@@ -49,7 +49,7 @@ func TestCompetitiveAISearchPairedMatches(t *testing.T) {
 			Backend:   battleai.DeploymentBackendONNXRuntime,
 			ModelPath: os.Getenv("QQTANG_TEST_ONNX_MODEL"), MetadataPath: os.Getenv("QQTANG_TEST_ONNX_METADATA"),
 			SharedLibraryPath: os.Getenv("QQTANG_TEST_ONNX_RUNTIME"), IntraOpThreads: 1, InterOpThreads: 1,
-			NativePolicyConfig: battleai.NativePolicyConfig{
+			ActorPolicyConfig: battleai.ActorPolicyConfig{
 				DangerHorizonMS: 3500, DecisionMS: 100, EnableSearch: index == 1,
 				Search: battleengine.SearchConfig{TopK: 4, HorizonMS: 3200, DangerHorizonMS: 3500, PriorWeight: 0.35, EliminationValue: 100, TrapValue: 12},
 			},

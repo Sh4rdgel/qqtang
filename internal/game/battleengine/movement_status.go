@@ -15,13 +15,15 @@ func (engine *Engine) installMovementStatus(actor *Actor, status MovementStatusK
 
 func (engine *Engine) clearMovementStatus(actor *Actor) Event {
 	status := actor.MovementStatus
+	change := engine.beginItemChange(actor)
 	actor.MovementStatus = MovementStatusNone
 	actor.MovementStatusExpiresAt = 0
 	actor.moveRemainder = 0
+	engine.finishItemChange(change, actor)
 	return Event{
 		Kind: EventMovementStatusEnded, TimeMS: engine.elapsedMS,
 		PlayerID: actor.PlayerID, Cell: actor.Position.Cell(), Position: actor.Position,
-		MovementStatus: status,
+		MovementStatus: status, ItemChange: change,
 	}
 }
 

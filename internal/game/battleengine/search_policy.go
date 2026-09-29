@@ -568,6 +568,15 @@ func tacticalEscapeDirection(engine *Engine, playerID uint16, horizonMS uint32) 
 	return direction, threatened, found
 }
 
+// EscapeFeasible reports, from already-existing bombs only, whether the actor
+// stands in a known explosion wave and, if so, whether a time-feasible route
+// leaves every known wave. It is a read-only forecast used to validate staged
+// curriculum starts; it never changes the engine or any action.
+func (engine *Engine) EscapeFeasible(playerID uint16, horizonMS uint32) (threatened, found bool) {
+	_, threatened, found, _ = tacticalEscapePlan(engine, playerID, horizonMS)
+	return threatened, found
+}
+
 // tacticalEscapePlan also returns the conservative whole-cell arrival time at
 // the first cell outside every known wave. Live safety uses that duration to
 // choose a speed- and route-aware escape deadline; speculative search only
@@ -620,7 +629,8 @@ func tacticalEscapePlan(engine *Engine, playerID uint16, horizonMS uint32) (dire
 		for _, worldDirection := range cardinal {
 			dx, dy, _ := worldDirection.delta()
 			next := Cell{Row: current.Row + int16(dy), Col: current.Col + int16(dx)}
-			if visited[next] || !tacticalCellTraversable(engine, actor, start, next, worldDirection) {
+			currentTile, _ := engine.grid.Cell(current)
+			if visited[next] || (!engine.actorCapabilities(actor, worldDirection).TraverseStaticTerrain && !currentTile.PlayerExitPassable(worldDirection)) || !tacticalCellTraversable(engine, actor, start, next, worldDirection) {
 				continue
 			}
 			speed := uint32(engine.effectiveSpeedPixelsPerSecond(actor, worldDirection))
@@ -657,7 +667,7 @@ func tacticalCellTraversable(engine *Engine, actor *Actor, start, cell Cell, dir
 		return false
 	}
 	capabilities := engine.actorCapabilities(actor, direction)
-	if tile.Kind != CellOpen && !capabilities.TraverseStaticTerrain {
+	if !tile.PlayerPassable(direction) && !capabilities.TraverseStaticTerrain {
 		return false
 	}
 	if cell != start && engine.bombAt(cell) >= 0 {

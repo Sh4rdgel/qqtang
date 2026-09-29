@@ -21,6 +21,7 @@ type Engine struct {
 	pickups                 []Pickup
 	pendingPickupDispatches []pendingPickupDispatch
 	recycledPickupSceneIDs  []uint32
+	scheduledPickups        []NativeScheduledPickup
 	lastPickupDispatchMS    uint32
 	publicWallItems         PublicWallItemProfile
 	elapsedMS               uint32
@@ -132,6 +133,9 @@ func (engine *Engine) Reset(config Config) error {
 	if err := validateInitialPickups(config.Grid, config.Rules, participants, pickups); err != nil {
 		return err
 	}
+	if err := validateScheduledPickups(config.ScheduledPickups); err != nil {
+		return err
+	}
 	sort.Slice(pickups, func(i, j int) bool {
 		if pickups[i].Cell.Row != pickups[j].Cell.Row {
 			return pickups[i].Cell.Row < pickups[j].Cell.Row
@@ -157,6 +161,7 @@ func (engine *Engine) Reset(config Config) error {
 	engine.pickups = pickups
 	engine.pendingPickupDispatches = nil
 	engine.recycledPickupSceneIDs = nil
+	engine.scheduledPickups = append([]NativeScheduledPickup(nil), config.ScheduledPickups...)
 	engine.lastPickupDispatchMS = 0
 	engine.publicWallItems = config.PublicWallItemProfile
 	engine.elapsedMS = config.Rules.StartClockMS
@@ -175,6 +180,13 @@ func (engine *Engine) Clone() *Engine {
 	clone := *engine
 	clone.grid = engine.grid.Clone()
 	clone.actors = append([]Actor(nil), engine.actors...)
+	for index := range clone.actors {
+		if motion := engine.actors[index].nativeHumanMotion; motion != nil {
+			copy := *motion
+			copy.queue = append([]NativeHumanMovement(nil), motion.queue...)
+			clone.actors[index].nativeHumanMotion = &copy
+		}
+	}
 	clone.bombs = append([]Bomb(nil), engine.bombs...)
 	clone.flames = append([]Flame(nil), engine.flames...)
 	clone.fieldObjects = append([]FieldObject(nil), engine.fieldObjects...)
@@ -184,6 +196,7 @@ func (engine *Engine) Clone() *Engine {
 	clone.pickups = append([]Pickup(nil), engine.pickups...)
 	clone.pendingPickupDispatches = append([]pendingPickupDispatch(nil), engine.pendingPickupDispatches...)
 	clone.recycledPickupSceneIDs = append([]uint32(nil), engine.recycledPickupSceneIDs...)
+	clone.scheduledPickups = append([]NativeScheduledPickup(nil), engine.scheduledPickups...)
 	clone.projectiles = append([]ActionProjectile(nil), engine.projectiles...)
 	if len(engine.nativeContactRequests) != 0 {
 		clone.nativeContactRequests = make(map[nativeContactRequestKey]struct{}, len(engine.nativeContactRequests))
@@ -226,6 +239,8 @@ func (engine *Engine) PolicySnapshot(playerID uint16) (*Engine, error) {
 	// its cell; the dispatch scheduler's contact guard prevents a policy snapshot
 	// from revealing authenticated coordinates before it is normally observable.
 	clone.pendingPickupDispatches = nil
+	// A policy must not inspect ItemSeed's future due-time schedule.
+	clone.scheduledPickups = nil
 	return clone, nil
 }
 

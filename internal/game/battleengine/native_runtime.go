@@ -40,6 +40,7 @@ type CompetitiveRuntimeOptions struct {
 	// intentionally empty list from an offline environment that should roll its
 	// own quantities from the map profile.
 	RecordedWallItems    []mapdata.CompetitiveWallItem
+	RecordedDelayedItems []mapdata.CompetitiveWallItem
 	UseRecordedWallItems bool
 	Participants         []NativeRuntimeParticipant
 	Policies             map[uint16]Policy
@@ -72,6 +73,7 @@ func NewRuntimeFromCompetitiveMap(entry mapdata.CompetitiveMap, options Competit
 		},
 		Participants:         participants,
 		RecordedWallItems:    append([]mapdata.CompetitiveWallItem(nil), options.RecordedWallItems...),
+		RecordedDelayedItems: append([]mapdata.CompetitiveWallItem(nil), options.RecordedDelayedItems...),
 		UseRecordedWallItems: options.UseRecordedWallItems,
 	})
 	if err != nil {

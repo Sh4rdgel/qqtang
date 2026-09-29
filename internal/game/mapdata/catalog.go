@@ -715,6 +715,11 @@ func (entry CompetitiveMap) RollWallItems(itemSeed uint32, participantCount, cap
 		if width := uint32(rule.Maximum-minimum) + 1; width > 1 {
 			quantity += int16(next() % width)
 		}
+		// Keep the native-table RNG draws so disabling an inert item does not
+		// reroll unrelated categories. It receives no cell in the allocation.
+		if entry.SuppressCompetitiveWallItem(rule.SceneID) {
+			return 0
+		}
 		return quantity
 	}
 	// Phase one owns the three base attributes and therefore their wall cells.

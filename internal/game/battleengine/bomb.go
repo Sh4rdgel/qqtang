@@ -83,6 +83,7 @@ func (engine *Engine) explodeDueBombsMatching(acceptRoot func(Bomb) bool) []Even
 	}
 	exploded := make(map[uint32]bool)
 	events := make([]Event, 0)
+	batch := blastBatch{wallSeen: make(map[Cell]bool), objectSeen: make(map[Cell]bool)}
 	for len(queue) > 0 {
 		bombID := queue[0]
 		queue = queue[1:]
@@ -92,7 +93,7 @@ func (engine *Engine) explodeDueBombsMatching(acceptRoot func(Bomb) bool) []Even
 		}
 		bomb := engine.bombs[bombIndex]
 		exploded[bombID] = true
-		blastCells, wallEvents := engine.blastCells(bomb, scheduled, &queue)
+		blastCells := engine.blastCells(bomb, scheduled, &queue, &batch)
 		rowMin, rowMax := bomb.Cell.Row, bomb.Cell.Row
 		colMin, colMax := bomb.Cell.Col, bomb.Cell.Col
 		for _, cell := range blastCells {
@@ -117,8 +118,10 @@ func (engine *Engine) explodeDueBombsMatching(acceptRoot func(Bomb) bool) []Even
 		for _, cell := range blastCells {
 			engine.addBombFlame(cell, bomb.OwnerID, bomb.ID)
 		}
-		events = append(events, wallEvents...)
 	}
+	// Native FA4 computes the entire due/chain batch against the old static
+	// layers. Remove old visible objects before revealing this batch's drops.
+	events = append(events, engine.commitBlastBatch(batch)...)
 	if len(exploded) == 0 {
 		return events
 	}
@@ -141,37 +144,82 @@ func (engine *Engine) bombIndexByID(bombID uint32) int {
 	return -1
 }
 
-func (engine *Engine) blastCells(bomb Bomb, scheduled map[uint32]bool, queue *[]uint32) ([]Cell, []Event) {
+type blastCellHit struct {
+	cell Cell
+	bomb Bomb
+}
+
+type blastBatch struct {
+	walls, objects       []blastCellHit
+	wallSeen, objectSeen map[Cell]bool
+}
+
+func (batch *blastBatch) hit(cell Cell, bomb Bomb, wall bool) {
+	seen, hits := batch.objectSeen, &batch.objects
+	if wall {
+		seen, hits = batch.wallSeen, &batch.walls
+	}
+	if !seen[cell] {
+		seen[cell] = true
+		*hits = append(*hits, blastCellHit{cell: cell, bomb: bomb})
+	}
+}
+
+func (engine *Engine) commitBlastBatch(batch blastBatch) []Event {
+	var events []Event
+	for _, hit := range batch.objects {
+		events = append(events, engine.destroyBlastObjectsAtCell(hit.cell, hit.bomb.OwnerID, hit.bomb.ID)...)
+	}
+	for _, hit := range batch.walls {
+		cell, bomb := hit.cell, hit.bomb
+		index := engine.gridIndex(cell)
+		tile := engine.grid.Cells[index]
+		if tile.Durability > 1 {
+			engine.grid.Cells[index].Durability--
+			events = append(events, Event{Kind: EventCellDamaged, TimeMS: engine.elapsedMS, PlayerID: bomb.OwnerID, BombID: bomb.ID, Cell: cell, ObjectID: tile.MapElementID})
+		} else {
+			engine.grid.Cells[index] = Tile{Kind: CellOpen, FlamePassable: true}
+			events = append(events, Event{Kind: EventCellDestroyed, TimeMS: engine.elapsedMS, PlayerID: bomb.OwnerID, BombID: bomb.ID, Cell: cell, ObjectID: tile.MapElementID,
+				OpenedTraversal: !tile.PlayerPassable(DirectionUp) || !tile.PlayerPassable(DirectionRight) || !tile.PlayerPassable(DirectionDown) || !tile.PlayerPassable(DirectionLeft)})
+			if event, revealed := engine.revealPickupAt(cell, bomb.OwnerID, bomb.ID); revealed {
+				events = append(events, event)
+			}
+		}
+	}
+	return events
+}
+
+func (engine *Engine) blastCells(bomb Bomb, scheduled map[uint32]bool, queue *[]uint32, batch *blastBatch) []Cell {
 	result := []Cell{bomb.Cell}
-	events := engine.destroyBlastObjectsAtCell(bomb.Cell, bomb.OwnerID, bomb.ID)
+	batch.hit(bomb.Cell, bomb, false)
 	directions := [...]Cell{{Row: -1}, {Col: 1}, {Row: 1}, {Col: -1}}
-	for _, direction := range directions {
+	for directionIndex, direction := range directions {
+		worldDirection := Direction(directionIndex) + DirectionUp
+		previous, _ := engine.grid.Cell(bomb.Cell)
 		for distance := int16(1); distance <= int16(bomb.Power); distance++ {
+			if !previous.FlamePassableIn(oppositeDirection(worldDirection)) {
+				break
+			}
 			cell := Cell{Row: bomb.Cell.Row + direction.Row*distance, Col: bomb.Cell.Col + direction.Col*distance}
 			tile, ok := engine.grid.Cell(cell)
 			if !ok {
 				break
 			}
-			if tile.Kind == CellBreakable {
-				result = append(result, cell)
-				index := int(cell.Row)*int(engine.grid.Width) + int(cell.Col)
-				if tile.Durability > 1 {
-					engine.grid.Cells[index].Durability--
-					events = append(events, Event{Kind: EventCellDamaged, TimeMS: engine.elapsedMS, PlayerID: bomb.OwnerID, BombID: bomb.ID, Cell: cell, ObjectID: tile.MapElementID})
-				} else {
-					engine.grid.Cells[index] = Tile{Kind: CellOpen, FlamePassable: true}
-					events = append(events, Event{Kind: EventCellDestroyed, TimeMS: engine.elapsedMS, PlayerID: bomb.OwnerID, BombID: bomb.ID, Cell: cell, ObjectID: tile.MapElementID})
-					if event, revealed := engine.revealPickupAt(cell, bomb.OwnerID, bomb.ID); revealed {
-						events = append(events, event)
-					}
+			if tile.Durability > 0 {
+				batch.hit(cell, bomb, true)
+				// Walkable grass may transmit this ray while being destroyed.
+				// Blocking breakable walls retain the native stop-on-hit rule.
+				if !tile.FlamePassableIn(worldDirection) {
+					result = append(result, cell)
+					break
 				}
+			}
+			if !tile.FlamePassableIn(worldDirection) {
 				break
 			}
-			if !tile.FlamePassable {
-				break
-			}
+			previous = tile
 			result = append(result, cell)
-			events = append(events, engine.destroyBlastObjectsAtCell(cell, bomb.OwnerID, bomb.ID)...)
+			batch.hit(cell, bomb, false)
 			otherBomb := false
 			for otherIndex := range engine.bombs {
 				otherBombObject := &engine.bombs[otherIndex]
@@ -206,7 +254,7 @@ func (engine *Engine) blastCells(bomb Bomb, scheduled map[uint32]bool, queue *[]
 			}
 		}
 	}
-	return result, events
+	return result
 }
 
 func (engine *Engine) addFlame(cell Cell, ownerID uint16) {

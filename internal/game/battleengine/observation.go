@@ -3,43 +3,45 @@ package battleengine
 import "fmt"
 
 type ActorObservation struct {
-	PlayerID                     uint16
-	RoleID                       uint16
-	TeamID                       byte
-	Source                       ParticipantSource
-	Position                     Position
-	Cell                         Cell
-	State                        ActorState
-	Facing                       Direction
-	BombCapacity                 byte
-	MaxBombCapacity              byte
-	BombPower                    byte
-	MaxBombPower                 byte
-	SpeedRate                    byte
-	MaxSpeedRate                 byte
-	SpeedPixelsPerSecond         uint16
-	ActiveBombs                  byte
-	TrapExpiresAt                uint32
-	HiddenPickupReachExpiresAt   uint32
-	SceneFourEffectExpiresAt     uint32
-	OxygenValue                  uint32
-	TransformationSceneID        uint32
-	AvatarRoleID                 uint16
-	TransformationExpiresAt      uint32
-	HarmProtectionExpiresAt      uint32
-	MatchSugar                   uint32
-	Capabilities                 ActorCapabilities
-	MovementStatus               MovementStatusKind
-	MovementStatusExpiresAt      uint32
-	HeldActions                  [NativeBattleActionSlots]HeldActionSlot
-	PublicBehavior               PublicBehaviorMemory
-	NativePassCollisionValid     bool
-	NativePassCollisionCell      Cell
-	NativePassCollisionStartedAt uint32
-	NativePassCollisionLastAt    uint32
-	NativePassActive             bool
-	NativePassStartedAt          uint32
-	NativePassDurationMS         uint32
+	PlayerID                       uint16
+	RoleID                         uint16
+	TeamID                         byte
+	Source                         ParticipantSource
+	Position                       Position
+	Cell                           Cell
+	State                          ActorState
+	Facing                         Direction
+	BombCapacity                   byte
+	MaxBombCapacity                byte
+	BombPower                      byte
+	MaxBombPower                   byte
+	SpeedRate                      byte
+	MaxSpeedRate                   byte
+	SpeedPixelsPerSecond           uint16
+	HorizontalSpeedPixelsPerSecond uint16
+	VerticalSpeedPixelsPerSecond   uint16
+	ActiveBombs                    byte
+	TrapExpiresAt                  uint32
+	HiddenPickupReachExpiresAt     uint32
+	SceneFourEffectExpiresAt       uint32
+	OxygenValue                    uint32
+	TransformationSceneID          uint32
+	AvatarRoleID                   uint16
+	TransformationExpiresAt        uint32
+	HarmProtectionExpiresAt        uint32
+	MatchSugar                     uint32
+	Capabilities                   ActorCapabilities
+	MovementStatus                 MovementStatusKind
+	MovementStatusExpiresAt        uint32
+	HeldActions                    [NativeBattleActionSlots]HeldActionSlot
+	PublicBehavior                 PublicBehaviorMemory
+	NativePassCollisionValid       bool
+	NativePassCollisionCell        Cell
+	NativePassCollisionStartedAt   uint32
+	NativePassCollisionLastAt      uint32
+	NativePassActive               bool
+	NativePassStartedAt            uint32
+	NativePassDurationMS           uint32
 }
 
 type Observation struct {
@@ -140,6 +142,8 @@ func (engine *Engine) Observations(playerIDs []uint16) ([]Observation, error) {
 		visible.MatchSugar = actor.MatchSugar
 		visible.MovementStatusExpiresAt = actor.MovementStatusExpiresAt
 		visible.Capabilities = engine.actorCapabilities(actor, actor.Facing)
+		visible.HorizontalSpeedPixelsPerSecond = engine.effectiveSpeedPixelsPerSecond(actor, DirectionRight)
+		visible.VerticalSpeedPixelsPerSecond = engine.effectiveSpeedPixelsPerSecond(actor, DirectionDown)
 		visible.NativePassCollisionValid = actor.NativePassCollisionValid
 		visible.NativePassCollisionCell = actor.NativePassCollisionCell
 		visible.NativePassCollisionStartedAt = actor.NativePassCollisionStartedAt

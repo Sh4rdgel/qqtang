@@ -253,9 +253,9 @@ func LoadConfig(path string) (Config, error) {
 	if config.CompetitiveAI.Enabled {
 		config.CompetitiveAI.Backend = strings.ToLower(strings.TrimSpace(config.CompetitiveAI.Backend))
 		if config.CompetitiveAI.Backend == "" {
-			config.CompetitiveAI.Backend = "native"
+			config.CompetitiveAI.Backend = "onnxruntime"
 		}
-		if config.CompetitiveAI.Backend != "native" && config.CompetitiveAI.Backend != "onnxruntime" {
+		if config.CompetitiveAI.Backend != "onnxruntime" {
 			return Config{}, fmt.Errorf("competitive_ai.backend %q is unsupported", config.CompetitiveAI.Backend)
 		}
 		if strings.TrimSpace(config.CompetitiveAI.ModelPath) == "" {

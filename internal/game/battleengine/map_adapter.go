@@ -21,6 +21,10 @@ func GridFromCompetitiveMap(entry mapdata.CompetitiveMap) (Grid, error) {
 	grid := Grid{Width: field.Width, Height: field.Height, Cells: make([]Tile, len(field.Cells))}
 	for index, cell := range field.Cells {
 		grid.Cells[index].FlamePassable = cell.FlamePassable
+		grid.Cells[index].NativeGridAttr = cell.NativeGridAttr
+		grid.Cells[index].NativeGridAttrSet = cell.NativeGridAttrSet
+		grid.Cells[index].NativePlayerExitAttr = cell.NativePlayerExitAttr
+		grid.Cells[index].NativePlayerExitAttrSet = cell.NativePlayerExitAttrSet
 		grid.Cells[index].MapElementOccupied = cell.MapElementOccupied
 		grid.Cells[index].Durability = cell.Durability
 		grid.Cells[index].MapElementID = cell.MapElementID
@@ -93,6 +97,7 @@ type CompetitiveMapConfigOptions struct {
 	// differential replay. UseRecordedWallItems distinguishes an explicitly
 	// empty recorded list from the normal live-server quantity roll.
 	RecordedWallItems    []mapdata.CompetitiveWallItem
+	RecordedDelayedItems []mapdata.CompetitiveWallItem
 	UseRecordedWallItems bool
 }
 
@@ -123,12 +128,24 @@ func ConfigFromCompetitiveMap(entry mapdata.CompetitiveMap, options CompetitiveM
 	if err != nil {
 		return Config{}, fmt.Errorf("competitive map %d: %w", entry.ID, err)
 	}
-	var pickups []Pickup
+	var items, delayed []mapdata.CompetitiveWallItem
 	if options.UseRecordedWallItems {
-		pickups, err = HiddenPickupsFromCompetitiveWallItems(entry, options.ItemSeed, options.RecordedWallItems)
+		// This legacy flag selects the recorded GAME_BEGIN arrays together.
+		// An old recording with no Items must not acquire today's new supply.
+		items, delayed = options.RecordedWallItems, options.RecordedDelayedItems
 	} else {
-		pickups, err = HiddenPickupsFromCompetitiveMap(entry, options.ItemSeed, len(options.Participants))
+		roles := make([]uint16, len(options.Participants))
+		for i, p := range options.Participants {
+			roles[i] = p.RoleID
+		}
+		supply := entry.PlanCompetitiveSupply(options.ItemSeed, roles, false)
+		items, delayed = supply.WallItems, supply.DelayedItems
 	}
+	pickups, err := HiddenPickupsFromCompetitiveWallItems(entry, options.ItemSeed, items)
+	if err != nil {
+		return Config{}, err
+	}
+	scheduled, err := ScheduledPickupsFromItems(options.ItemSeed, delayed)
 	if err != nil {
 		return Config{}, err
 	}
@@ -138,8 +155,28 @@ func ConfigFromCompetitiveMap(entry mapdata.CompetitiveMap, options CompetitiveM
 	}
 	return Config{
 		Seed: seed, Grid: grid, Rules: rules, Participants: participants, Pickups: pickups,
-		PublicWallItemProfile: publicWallItemProfile(entry),
+		ScheduledPickups:      scheduled,
+		PublicWallItemProfile: publicWallItemProfileFromWire(entry, items),
 	}, nil
+}
+
+// GAME_BEGIN broadcasts final quantities to every participant. Expose only
+// those public counts, never ItemSeed's hidden coordinates or future schedule.
+func publicWallItemProfileFromWire(entry mapdata.CompetitiveMap, items []mapdata.CompetitiveWallItem) PublicWallItemProfile {
+	var profile PublicWallItemProfile
+	if len(entry.HiddenItemCells) == 0 {
+		return profile
+	}
+	for _, item := range items {
+		if category, ok := publicWallItemCategory(item.SceneID); ok && item.Quantity > 0 {
+			profile.Categories[category].PresenceProbability = 1
+			profile.Categories[category].ExpectedDensity += float32(item.Quantity) / float32(len(entry.HiddenItemCells))
+		}
+	}
+	for i := range profile.Categories {
+		profile.Categories[i].ExpectedDensity = min(1, profile.Categories[i].ExpectedDensity)
+	}
+	return profile
 }
 
 func publicWallItemProfile(entry mapdata.CompetitiveMap) PublicWallItemProfile {
@@ -153,6 +190,9 @@ func publicWallItemProfile(entry mapdata.CompetitiveMap) PublicWallItemProfile {
 	}
 	capacity := float32(len(entry.HiddenItemCells))
 	for _, rule := range entry.WallItemRules {
+		if entry.SuppressCompetitiveWallItem(rule.SceneID) {
+			continue
+		}
 		category, ok := publicWallItemCategory(rule.SceneID)
 		if !ok || rule.Probability <= 0 || rule.Maximum <= 0 {
 			continue

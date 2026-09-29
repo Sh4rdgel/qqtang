@@ -50,7 +50,10 @@ func (engine *Engine) scatterNativeDeathDrops(actor *Actor) []Pickup {
 	if len(sceneIDs) == 0 {
 		return nil
 	}
-	cells := engine.nativeDeathDropCells(actor.Position.Cell(), len(sceneIDs))
+	// Ordinary rule 1 passes the default rectangle to native FUN_005b8574,
+	// selecting unoccupied cells across the map. The death producer's 5x5
+	// rectangle is conditional on rule 12, not on the number of carried items.
+	cells := engine.nativeWholeMapDropCells(len(sceneIDs))
 	if len(cells) < len(sceneIDs) {
 		sceneIDs = sceneIDs[:len(cells)]
 	}
@@ -59,44 +62,6 @@ func (engine *Engine) scatterNativeDeathDrops(actor *Actor) []Pickup {
 		drops[index] = Pickup{SceneID: sceneIDs[index], Cell: cells[index], State: PickupAvailable}
 	}
 	return drops
-}
-
-// nativeDeathDropCells mirrors Client.exe FUN_005b8574 as used by the rule-1
-// death producer: enumerate unoccupied cells in a 5x5 area beginning at the
-// map lower bound or two cells above/left of the actor, then randomly erase
-// candidates until at most one cell remains per carried temporary item.
-func (engine *Engine) nativeDeathDropCells(origin Cell, count int) []Cell {
-	if count <= 0 {
-		return nil
-	}
-	if count > nativeDeathDropMaximum {
-		count = nativeDeathDropMaximum
-	}
-	startRow := origin.Row - 2
-	startCol := origin.Col - 2
-	if startRow < 0 {
-		startRow = 0
-	}
-	if startCol < 0 {
-		startCol = 0
-	}
-	candidates := make([]Cell, 0, 25)
-	for row := startRow; row < startRow+5; row++ {
-		for col := startCol; col < startCol+5; col++ {
-			cell := Cell{Row: row, Col: col}
-			tile, inside := engine.grid.Cell(cell)
-			if !inside || tile.Kind != CellOpen || engine.bombAt(cell) >= 0 || engine.deathDropCellOccupied(cell) {
-				continue
-			}
-			candidates = append(candidates, cell)
-		}
-	}
-	for len(candidates) > count {
-		remove := int(engine.nextSimulationRandom() % uint64(len(candidates)))
-		copy(candidates[remove:], candidates[remove+1:])
-		candidates = candidates[:len(candidates)-1]
-	}
-	return candidates
 }
 
 func (engine *Engine) deathDropCellOccupied(cell Cell) bool {

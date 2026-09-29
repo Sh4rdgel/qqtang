@@ -26,7 +26,7 @@ func TestLoadConfigSelectsONNXRuntimeLibraryOnlyWhenNeeded(t *testing.T) {
 		{"automatic", `{"enabled":true,"backend":"onnxruntime","model_path":"models/actor.onnx"}`, "auto"},
 		{"explicit", `{"enabled":true,"backend":"onnxruntime","model_path":"models/actor.onnx","shared_library_path":"custom/runtime-library"}`, "custom/runtime-library"},
 		{"disabled", `{"enabled":false,"backend":"onnxruntime"}`, ""},
-		{"native", `{"enabled":true,"backend":"native","model_path":"models/actor.onnx"}`, ""},
+		{"default", `{"enabled":true,"model_path":"models/actor.onnx"}`, "auto"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			dir := t.TempDir()

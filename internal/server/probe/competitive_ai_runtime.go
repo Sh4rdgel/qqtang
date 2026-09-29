@@ -127,8 +127,11 @@ type liveCompetitiveAIHitRequestKey struct {
 }
 
 type liveCompetitiveAIHitRequest struct {
-	sourceID uint16
-	state    liveCompetitiveAIHitRequestState
+	sourceID   uint16
+	state      liveCompetitiveAIHitRequestState
+	payload    []byte // identical scene/message identity; outer UDP number is new
+	lastSentAt time.Time
+	attempts   byte
 }
 
 type liveCompetitiveAIHitRequestState byte
@@ -136,6 +139,7 @@ type liveCompetitiveAIHitRequestState byte
 const (
 	competitiveAIHitPending liveCompetitiveAIHitRequestState = iota + 1
 	competitiveAIHitCommitted
+	competitiveAIHitRecoveryRequired
 )
 
 type liveCompetitiveAIPickupRequestKey struct {
@@ -355,13 +359,21 @@ func competitiveAIDecisionPhase(gameID, spawnSeed, itemSeed uint32, playerID uin
 	if decisionSteps <= 1 {
 		return 0
 	}
-	// Live QTAI inference is deliberately greedy. Without an actor-local phase,
+	// Live ONNX inference is deliberately greedy. Without an actor-local phase,
 	// symmetric observations make every participant call the same argmax on the
 	// same world frame and can lock a whole group into visibly cloned rhythms.
 	// A match-seeded phase keeps inference deterministic/replayable while giving
 	// each native identity its own 20 ms decision alignment.
 	random := competitiveAIPRNG{state: uint64(gameID)<<32 ^ uint64(spawnSeed) ^ uint64(itemSeed)<<1 ^ uint64(playerID)*0xD6E8FEB86659FD93}
 	return uint32(random.next() % uint64(decisionSteps))
+}
+
+// competitiveAISampleSeed seeds an actor's sampled action choices (when the
+// deployment enables them) from the match and player, so each virtual player
+// draws its own stream and a match replays exactly.
+func competitiveAISampleSeed(gameID, spawnSeed, itemSeed uint32, playerID uint16) uint64 {
+	random := competitiveAIPRNG{state: uint64(gameID)<<32 ^ uint64(spawnSeed)<<1 ^ uint64(itemSeed) ^ uint64(playerID)*0x9E3779B97F4A7C15}
+	return random.next()
 }
 
 // liveCompetitiveAIRuntime is the transport/lifecycle adapter around the
@@ -400,6 +412,7 @@ type liveCompetitiveAIRuntime struct {
 	humanActions        map[liveCompetitiveAIHumanActionKey]struct{}
 	humanKicks          map[liveCompetitiveAIHumanMoveBombKey]struct{}
 	nativeInbound       map[liveCompetitiveAIInboundKey]struct{}
+	nativeUDPSequence   map[uint16]uint32
 	positionHistory     []liveCompetitiveAIPositionFrame
 	authorityClockReady bool
 	authorityClockMS    uint32
@@ -449,6 +462,10 @@ func newLiveCompetitiveAIRuntime(
 			// actor-local state wrapper here.
 			actorPolicy := policy
 			if factory, ok := policy.(interface {
+				NewSeededActorPolicy(seed uint64) battleengine.Policy
+			}); ok {
+				actorPolicy = factory.NewSeededActorPolicy(competitiveAISampleSeed(gameData.GameID, gameData.SpawnSeed, gameData.ItemSeed, participant.PlayerID))
+			} else if factory, ok := policy.(interface {
 				NewActorPolicy() battleengine.Policy
 			}); ok {
 				actorPolicy = factory.NewActorPolicy()
@@ -473,6 +490,7 @@ func newLiveCompetitiveAIRuntime(
 		SpawnMode: spawnMode, TickMS: worldTickMS, TrapDurationMS: 0, VirtualTrapDurationMS: 6_000,
 		NativeOutcomeAuthority: true,
 		RecordedWallItems:      competitiveAIWallItems(gameData.NewItems),
+		RecordedDelayedItems:   competitiveAIWallItems(gameData.Items),
 		UseRecordedWallItems:   true,
 		Participants:           nativeParticipants, Policies: policies,
 	})
@@ -1018,6 +1036,7 @@ func (runtime *liveCompetitiveAIRuntime) advanceOnRoomActor(server *Server) erro
 		return nil
 	}
 	target := runtime.targetElapsedMSLocked(time.Now())
+	runtime.retryHitRequests(server, time.Now())
 	err := runtime.advanceToLocked(server, target, competitiveAIMaxCatchUpSteps)
 	runtime.mu.Unlock()
 	return err
@@ -1326,7 +1345,7 @@ func competitiveAIMovementFrameSamples(
 	moving, direction := competitiveAINativeMovementIntent(action, current)
 	var moves []game.PlayerMoveSequence
 	if before != nil && !forced &&
-		(!projection.initialized || projection.lastSentAt < before.ElapsedMS()) && action.UseActionID == 0 {
+		(!projection.initialized || projection.lastSentAt < before.ElapsedMS()) {
 		previous, previousOK := actorByID(before.Actors(), playerID)
 		beforeSpeed, _ := before.NativeEffectiveSpeedRate(playerID, direction)
 		afterSpeed, _ := after.NativeEffectiveSpeedRate(playerID, direction)
@@ -2006,7 +2025,7 @@ func competitiveAIHitKey(hit game.PlayerExplodedEvent) liveCompetitiveAIHitReque
 	}
 }
 
-func (runtime *liveCompetitiveAIRuntime) reserveHitRequest(hit game.PlayerExplodedEvent, sourceID uint16, _ time.Time) {
+func (runtime *liveCompetitiveAIRuntime) reserveHitRequest(hit game.PlayerExplodedEvent, sourceID uint16, now time.Time) {
 	runtime.hitRequestMu.Lock()
 	defer runtime.hitRequestMu.Unlock()
 	// A quarantined actor cannot generate a second hit. Once an avatar hit has
@@ -2018,7 +2037,7 @@ func (runtime *liveCompetitiveAIRuntime) reserveHitRequest(hit game.PlayerExplod
 		}
 	}
 	runtime.hitRequests[competitiveAIHitKey(hit)] = liveCompetitiveAIHitRequest{
-		sourceID: sourceID, state: competitiveAIHitPending,
+		sourceID: sourceID, state: competitiveAIHitPending, lastSentAt: now, attempts: 1,
 	}
 }
 
@@ -2047,7 +2066,12 @@ func (runtime *liveCompetitiveAIRuntime) projectActorHit(server *Server, event b
 		server.log(logEvent{Level: "error", Event: "competitive_ai_trapped_build_failed", RoomID: fmt.Sprint(runtime.roomID), ErrorContext: err.Error()})
 		return false
 	}
-	if err = runtime.runtime.SuspendVirtualActor(event.PlayerID, true); err != nil {
+	runtime.messageSeq[event.PlayerID]++
+	payload, err := buildCompetitiveAIPeerGameplayPayload(runtime.gameID, event.PlayerID, wireTime, runtime.messageSeq[event.PlayerID], game.PlayerBeExploded, wireTime, body)
+	if err != nil {
+		return false
+	}
+	if err = runtime.runtime.SuspendVirtualActorAtHit(event.PlayerID, event.Position); err != nil {
 		server.log(logEvent{Level: "warn", Event: "competitive_ai_hit_suspend_failed", RoomID: fmt.Sprint(runtime.roomID), Result: fmt.Sprintf("game_%d_player_%d", runtime.gameID, event.PlayerID), ErrorContext: err.Error()})
 		return false
 	}
@@ -2056,11 +2080,13 @@ func (runtime *liveCompetitiveAIRuntime) projectActorHit(server *Server, event b
 	// the identical body over reliable TCP. Reserve the exact request before the
 	// UDP send so a very fast reliable response cannot race its transaction.
 	runtime.reserveHitRequest(exploded, event.TargetID, time.Now())
-	if err := runtime.sendPeerGameplayEvent(server, event.PlayerID, wireTime, game.PlayerBeExploded, wireTime, body); err != nil {
-		runtime.clearHitRequest(exploded)
-		_ = runtime.runtime.SuspendVirtualActor(event.PlayerID, false)
+	runtime.hitRequestMu.Lock()
+	request := runtime.hitRequests[competitiveAIHitKey(exploded)]
+	request.payload = payload
+	runtime.hitRequests[competitiveAIHitKey(exploded)] = request
+	runtime.hitRequestMu.Unlock()
+	if err := runtime.sendPeerPayload(server, event.PlayerID, payload); err != nil {
 		server.log(logEvent{Level: "warn", Event: "competitive_ai_trapped_peer_failed", RoomID: fmt.Sprint(runtime.roomID), ErrorContext: err.Error()})
-		return true
 	}
 	runtime.projectActorHitMovement(server, event)
 	server.log(logEvent{Level: "debug", Event: "competitive_ai_trapped_requested", RoomID: fmt.Sprint(runtime.roomID), Result: fmt.Sprintf("game_%d_player_%d_source_%d_time_%d_avatar_%t_pos_%d_%d", runtime.gameID, event.PlayerID, event.TargetID, wireTime, isAvatar, event.Position.X, event.Position.Y)})
@@ -2457,42 +2483,6 @@ func (server *Server) recordCompetitiveAIHumanPackagesOnRoomActor(runtime *liveC
 	arbitratorID := battle.ArbitratorPlayerID()
 	runtime.mu.Lock()
 	observedAt := time.Now()
-	causalTarget := uint32(0)
-	for _, packet := range packages {
-		if _, human := runtime.humanIDs[packet.PlayerID]; !human || packet.PlayerID != arbitratorID {
-			continue
-		}
-		runtime.observeAuthorityClockLocked(packet.Time, observedAt)
-		for _, message := range packet.Messages {
-			runtime.observeAuthorityClockLocked(message.Time, observedAt)
-			if message.DataID <= 0xffff && competitiveAICausalAuthorityMessage(uint16(message.DataID)) && message.Time > causalTarget {
-				causalTarget = message.Time
-			}
-		}
-	}
-	if causalTarget >= battleengine.NativeRoundStartClockMS {
-		causalTarget = competitiveAICompletedSceneFrameMS(causalTarget, uint32(runtime.worldTick/time.Millisecond))
-		catchupFrom := uint32(0)
-		if snapshot := runtime.runtime.EngineSnapshot(); snapshot != nil {
-			catchupFrom = snapshot.ElapsedMS()
-		}
-		if advanceErr := runtime.advanceToLocked(server, causalTarget, 0); advanceErr != nil {
-			runtime.mu.Unlock()
-			server.log(logEvent{Level: "error", Event: "competitive_ai_authority_catchup_failed", RoomID: fmt.Sprint(runtime.roomID), Result: fmt.Sprintf("game_%d_target_%d", runtime.gameID, causalTarget), ErrorContext: advanceErr.Error()})
-			runtime.stopRuntime()
-			return
-		}
-		if runtime.stopped() {
-			runtime.mu.Unlock()
-			return
-		}
-		if catchupFrom < causalTarget && server.logWriter != nil {
-			server.log(logEvent{
-				Level: "debug", Event: "competitive_ai_authority_catchup", RoomID: fmt.Sprint(runtime.roomID),
-				Result: fmt.Sprintf("game_%d_from_%d_to_%d_gap_%d", runtime.gameID, catchupFrom, causalTarget, causalTarget-catchupFrom),
-			})
-		}
-	}
 	recordVirtualFrame := false
 	for _, packet := range packages {
 		if _, human := runtime.humanIDs[packet.PlayerID]; !human {
@@ -2512,6 +2502,31 @@ func (server *Server) recordCompetitiveAIHumanPackagesOnRoomActor(runtime *liveC
 				}
 				continue
 			}
+			// Preserve the authenticated stream order. Advance only to THIS
+			// event, apply it, then let the next event advance the changed world.
+			// Packet.Time is a send clock, not the occurrence of every old fact
+			// bundled into the packet.
+			if packet.PlayerID == arbitratorID {
+				runtime.observeAuthorityClockLocked(packet.Time, observedAt)
+				runtime.observeAuthorityClockLocked(message.Time, observedAt)
+				eventTime := competitiveAIEventClock(message)
+				if competitiveAICausalAuthorityMessage(schema) && eventTime >= battleengine.NativeRoundStartClockMS && eventTime <= battleengine.StandardRoundTimeMS {
+					target := competitiveAICompletedSceneFrameMS(eventTime, uint32(runtime.worldTick/time.Millisecond))
+					if snapshot := runtime.runtime.EngineSnapshot(); snapshot != nil && snapshot.ElapsedMS() > target {
+						server.log(logEvent{Level: "debug", Event: "competitive_ai_late_authority_fact", RoomID: fmt.Sprint(runtime.roomID), Result: fmt.Sprintf("game_%d_schema_%04X_event_%d_scene_%d", gameID, schema, target, snapshot.ElapsedMS())})
+					}
+					if err := runtime.advanceToLocked(server, target, 0); err != nil {
+						runtime.mu.Unlock()
+						server.log(logEvent{Level: "error", Event: "competitive_ai_authority_catchup_failed", RoomID: fmt.Sprint(runtime.roomID), ErrorContext: err.Error()})
+						runtime.stopRuntime()
+						return
+					}
+					if runtime.stopped() {
+						runtime.mu.Unlock()
+						return
+					}
+				}
+			}
 			if schema != game.PlayerMoveSchema {
 				recordVirtualFrame = true
 			}
@@ -2525,7 +2540,17 @@ func (server *Server) recordCompetitiveAIHumanPackagesOnRoomActor(runtime *liveC
 					if entry.PlayerID != packet.PlayerID {
 						continue
 					}
-					_ = runtime.runtime.ReconcileHumanMovementState(entry.PlayerID, battleengine.Position{X: int32(entry.Move.CurrentPosX), Y: int32(entry.Move.CurrentPosY)}, battleDirection(entry.Move.WalkAndDirection))
+					move := entry.Move
+					if err := runtime.runtime.ReconcileHumanMovementPath(entry.PlayerID, battleengine.NativeHumanMovement{
+						Sequence: move.Sequence, TimeMS: move.TimeStamp,
+						Current:   battleengine.Position{X: int32(move.CurrentPosX), Y: int32(move.CurrentPosY)},
+						Corner:    battleengine.Position{X: int32(move.CornerPosX), Y: int32(move.CornerPosY)},
+						End:       battleengine.Position{X: int32(move.EndPosX), Y: int32(move.EndPosY)},
+						Direction: battleDirection(move.WalkAndDirection), Speed: move.Speed,
+						Moving: move.WalkAndDirection&0x10 != 0, Forced: move.WalkAndDirection&0x20 != 0,
+					}); err != nil {
+						server.log(logEvent{Level: "warn", Event: "competitive_ai_human_path_rejected", RoomID: fmt.Sprint(runtime.roomID), ErrorContext: err.Error()})
+					}
 				}
 			case game.PlayerUseBomb:
 				placed, err := game.ParsePlayerUseBombEvent(game.GameEvent{Schema: game.PlayerUseBomb, Body: message.Data})
@@ -2743,7 +2768,7 @@ func (server *Server) recordCompetitiveAIHumanPackagesOnRoomActor(runtime *liveC
 				if _, duplicate := runtime.nativeDispatches[key]; duplicate {
 					continue
 				}
-				pickups := battlePickupsFromDispatch(dispatch)
+				pickups := battlePickupsFromDispatch(dispatch, runtime.mapID)
 				if acceptErr := runtime.runtime.AcceptNativePickupDispatch(dispatch.Time, pickups); acceptErr != nil {
 					server.log(logEvent{Level: "warn", Event: "competitive_ai_native_item_dispatch_rejected", RoomID: fmt.Sprint(runtime.roomID), Result: fmt.Sprintf("game_%d_player_%d_time_%d_items_%d_delayed_%d", runtime.gameID, packet.PlayerID, dispatch.Time, len(dispatch.Items), len(dispatch.DelayedItems)), ErrorContext: acceptErr.Error()})
 					continue
@@ -2895,17 +2920,22 @@ func battlePickupsFromGameItems(items []game.GameItem) []battleengine.Pickup {
 // combines both QQT_GAME_ITEM and ITEM_FROM_SERVER coordinate vectors before
 // starting one bird pass. The battle engine retains them as non-observable
 // dispatch targets until the bird and per-object landing state have completed.
-func battlePickupsFromDispatch(dispatch game.DispatchItemData) []battleengine.Pickup {
-	drops := battlePickupsFromGameItems(dispatch.Items)
-	if len(dispatch.DelayedItems) == 0 {
-		return drops
+func battlePickupsFromDispatch(dispatch game.DispatchItemData, mapIDs ...uint32) []battleengine.Pickup {
+	noTransformation := false
+	if len(mapIDs) != 0 {
+		switch mapIDs[0] {
+		case 315, 316, 1011, 1012:
+			noTransformation = true
+		}
 	}
-	if drops == nil {
-		drops = make([]battleengine.Pickup, 0, len(dispatch.DelayedItems))
-	} else {
-		grown := make([]battleengine.Pickup, len(drops), len(drops)+len(dispatch.DelayedItems))
-		copy(grown, drops)
-		drops = grown
+	drops := make([]battleengine.Pickup, 0, battleengine.NativePickupDispatchMaximum)
+	for _, item := range dispatch.Items {
+		// 00603f01 filters only immediate entries on these native maps.
+		if noTransformation && item.ItemID >= 101 && item.ItemID <= 115 {
+			continue
+		}
+		drops = append(drops, battleengine.Pickup{SceneID: item.ItemID,
+			Cell: battleengine.Cell{Row: int16(item.Row), Col: int16(item.Col)}, State: battleengine.PickupAvailable})
 	}
 	for _, item := range dispatch.DelayedItems {
 		drops = append(drops, battleengine.Pickup{
@@ -2913,6 +2943,9 @@ func battlePickupsFromDispatch(dispatch game.DispatchItemData) []battleengine.Pi
 			Cell:    battleengine.Cell{Row: int16(item.Row), Col: int16(item.Col)},
 			State:   battleengine.PickupAvailable,
 		})
+	}
+	if len(drops) > battleengine.NativePickupDispatchMaximum {
+		drops = drops[:battleengine.NativePickupDispatchMaximum]
 	}
 	return drops
 }

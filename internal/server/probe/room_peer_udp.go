@@ -478,7 +478,38 @@ func (server *Server) handleLegacyUDPMulticast(connection *net.UDPConn, connecti
 		})
 		return
 	}
-	server.recordCompetitiveAIHumanPackages(decodedBatch.GameID, aiPackages)
+	server.recordCompetitiveAIHumanUDPPackages(decodedBatch.GameID, packet.Header.PlayerID, packet.Header.PacketNumber, aiPackages)
+}
+
+// Only the server-owned recipient mirror applies this receive window. Human
+// recipients still receive the original ciphertext and own their receive state.
+func (server *Server) recordCompetitiveAIHumanUDPPackages(gameID uint32, senderID uint16, number uint32, packages []game.GameplayDataPackage) {
+	runtime := server.competitiveAIRuntimeForGame(gameID)
+	if runtime == nil {
+		return
+	}
+	err := runRoomActor(server, runtime.roomID, "competitive-ai-native-udp", func() error {
+		if runtime.acceptNativeUDPPacket(senderID, number) {
+			server.recordCompetitiveAIHumanPackagesOnRoomActor(runtime, packages)
+		}
+		return nil
+	})
+	if err != nil {
+		server.log(logEvent{Level: "error", Event: "competitive_ai_native_udp_failed", RoomID: fmt.Sprint(runtime.roomID), ErrorContext: err.Error()})
+	}
+}
+
+func (runtime *liveCompetitiveAIRuntime) acceptNativeUDPPacket(senderID uint16, number uint32) bool {
+	runtime.inboundMu.Lock()
+	defer runtime.inboundMu.Unlock()
+	if runtime.nativeUDPSequence == nil {
+		runtime.nativeUDPSequence = make(map[uint16]uint32)
+	}
+	if previous, seen := runtime.nativeUDPSequence[senderID]; seen && !legacyUDPSequenceAfter(number, previous) {
+		return false
+	}
+	runtime.nativeUDPSequence[senderID] = number
+	return true
 }
 
 func competitiveAIHumanPackagesFromBatch(batch game.GameplayBatch, senderPlayerID uint16) ([]game.GameplayDataPackage, error) {

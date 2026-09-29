@@ -9,7 +9,6 @@ import (
 )
 
 const (
-	DeploymentBackendNative      = "native"
 	DeploymentBackendONNXRuntime = "onnxruntime"
 )
 
@@ -17,13 +16,13 @@ const (
 // startup. It never changes the authoritative combat policy or switches
 // numerical backends between frames.
 type DeploymentPolicyConfig struct {
-	Backend            string
-	ModelPath          string
-	MetadataPath       string
-	SharedLibraryPath  string
-	IntraOpThreads     int
-	InterOpThreads     int
-	NativePolicyConfig NativePolicyConfig
+	Backend           string
+	ModelPath         string
+	MetadataPath      string
+	SharedLibraryPath string
+	IntraOpThreads    int
+	InterOpThreads    int
+	ActorPolicyConfig ActorPolicyConfig
 }
 
 // LoadedPolicy owns any backend resources needed by a server process.
@@ -35,13 +34,11 @@ type LoadedPolicy struct {
 }
 
 // LoadDeploymentPolicy is deliberately strict: a requested ONNX Runtime
-// backend must initialize successfully. Operators can explicitly select the
-// native backend for recovery, but a packaging error is never hidden by an
-// automatic numerical-backend change.
+// backend must initialize successfully; packaging failures are startup errors.
 func LoadDeploymentPolicy(config DeploymentPolicyConfig) (LoadedPolicy, error) {
 	backend := strings.ToLower(strings.TrimSpace(config.Backend))
 	if backend == "" {
-		backend = DeploymentBackendNative
+		backend = DeploymentBackendONNXRuntime
 	}
 	var (
 		runner   LogitRunner
@@ -50,13 +47,6 @@ func LoadDeploymentPolicy(config DeploymentPolicyConfig) (LoadedPolicy, error) {
 		err      error
 	)
 	switch backend {
-	case DeploymentBackendNative:
-		var native *NativeRunner
-		native, err = LoadNativeRunner(config.ModelPath)
-		if err == nil {
-			runner = native
-			contract = native.Contract()
-		}
 	case DeploymentBackendONNXRuntime:
 		runner, contract, closer, err = loadONNXRuntimeDeploymentRunner(config)
 	default:
@@ -65,7 +55,7 @@ func LoadDeploymentPolicy(config DeploymentPolicyConfig) (LoadedPolicy, error) {
 	if err != nil {
 		return LoadedPolicy{}, fmt.Errorf("load %s AI backend: %w", backend, err)
 	}
-	policy, err := buildActorPolicy(contract, runner, config.NativePolicyConfig)
+	policy, err := buildActorPolicy(contract, runner, config.ActorPolicyConfig)
 	if err != nil {
 		if closer != nil {
 			_ = closer.Close()

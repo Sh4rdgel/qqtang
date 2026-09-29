@@ -73,7 +73,7 @@ func BenchmarkCompetitiveAILiveWorldStep(b *testing.B) {
 			PlayerID: 20001 + index, RoleID: 2, TeamID: teamID, Source: match.CompetitiveParticipantVirtualAI,
 		})
 	}
-	modelPath := os.Getenv("QQTANG_AI_CANDIDATE_MODEL")
+	modelPath := os.Getenv("QQTANG_TEST_ONNX_MODEL")
 	for _, benchmark := range []struct {
 		name           string
 		searchEnabled  bool
@@ -92,7 +92,7 @@ func BenchmarkCompetitiveAILiveWorldStep(b *testing.B) {
 					participants[index].TeamID = byte(index + 1)
 				}
 			}
-			policyConfig := battleai.NativePolicyConfig{
+			policyConfig := battleai.ActorPolicyConfig{
 				DangerHorizonMS: 3_500,
 				DecisionMS:      100,
 				EnableSearch:    benchmark.searchEnabled,
@@ -101,7 +101,7 @@ func BenchmarkCompetitiveAILiveWorldStep(b *testing.B) {
 					PriorWeight: 0.35, EliminationValue: 100, TrapValue: 12,
 				},
 			}
-			deployment := battleai.DeploymentPolicyConfig{Backend: battleai.DeploymentBackendNative, ModelPath: modelPath, NativePolicyConfig: policyConfig}
+			deployment := battleai.DeploymentPolicyConfig{Backend: battleai.DeploymentBackendONNXRuntime, ModelPath: modelPath, ActorPolicyConfig: policyConfig}
 			if onnx := os.Getenv("QQTANG_TEST_ONNX_MODEL"); onnx != "" {
 				deployment.Backend = battleai.DeploymentBackendONNXRuntime
 				deployment.ModelPath = onnx
@@ -111,7 +111,7 @@ func BenchmarkCompetitiveAILiveWorldStep(b *testing.B) {
 				deployment.InterOpThreads = 1
 			}
 			if deployment.ModelPath == "" {
-				b.Skip("set QQTANG_TEST_ONNX_MODEL or QQTANG_AI_CANDIDATE_MODEL for inference benchmarking")
+				b.Skip("set QQTANG_TEST_ONNX_MODEL for inference benchmarking")
 			}
 			loaded, err := battleai.LoadDeploymentPolicy(deployment)
 			if err != nil {

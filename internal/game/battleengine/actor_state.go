@@ -2,6 +2,7 @@ package battleengine
 
 import (
 	"fmt"
+	"sort"
 
 	"qqtang/internal/clientdata/sceneelement"
 )
@@ -11,7 +12,7 @@ func (engine *Engine) resolveActorContacts() []Event {
 	var pending map[nativeContactRequestKey]struct{}
 	for actorIndex := range engine.actors {
 		actor := &engine.actors[actorIndex]
-		if actor.State == ActorEliminated || actor.nativePreviousPosition.Cell() == actor.Position.Cell() {
+		if actor.State == ActorEliminated || actor.nativeHitPending || actor.nativePreviousPosition.Cell() == actor.Position.Cell() {
 			continue
 		}
 		for targetIndex := range engine.actors {
@@ -19,7 +20,7 @@ func (engine *Engine) resolveActorContacts() []Event {
 			// Rule-1 contact producer 0060c148 tests both coordinate deltas
 			// against 41.0 (strictly), independently of the actors' grid cells.
 			dx, dy := actor.Position.X-target.Position.X, actor.Position.Y-target.Position.Y
-			if target.State != ActorTrapped || actor.PlayerID == target.PlayerID || dx <= -41 || dx >= 41 || dy <= -41 || dy >= 41 {
+			if target.State != ActorTrapped || target.nativeHitPending || actor.PlayerID == target.PlayerID || dx <= -41 || dx >= 41 || dy <= -41 || dy >= 41 {
 				continue
 			}
 			if engine.rules.NativeOutcomeAuthority {
@@ -138,6 +139,7 @@ func (engine *Engine) endTransformation(actor *Actor, reason TransformationEndRe
 		PlayerID: actor.PlayerID, TargetID: sourceID, Cell: actor.Position.Cell(), Position: actor.Position,
 		SceneID: actor.TransformationSceneID, AvatarRoleID: actor.AvatarRoleID, TransformationEnd: reason,
 		EffectExpiresAt: protectionExpiresAt,
+		ItemChange:      engine.beginItemChange(actor),
 	}
 	if definition, ok := sceneelement.NativeTransformation(sceneelement.ID(actor.TransformationSceneID)); ok && definition.GrantedActionID != 0 {
 		removeHeldAction(actor, definition.GrantedActionID)
@@ -146,6 +148,7 @@ func (engine *Engine) endTransformation(actor *Actor, reason TransformationEndRe
 	actor.AvatarRoleID = 0
 	actor.TransformationExpiresAt = 0
 	actor.HarmProtectionExpiresAt = protectionExpiresAt
+	engine.finishItemChange(event.ItemChange, actor)
 	return event
 }
 
@@ -285,6 +288,7 @@ func (engine *Engine) actorHarmProtected(actor *Actor) bool {
 }
 
 func (engine *Engine) resetActorOnHit(actor *Actor) {
+	stopNativeHumanMovement(actor)
 	// Native 005acaab clears the movement modifier before both hit paths.
 	// The normal branch and avatar callback 005f78bf both face down (3).
 	engine.clearMovementStatus(actor)
@@ -305,21 +309,35 @@ func (engine *Engine) expireTraps() []Event {
 	if engine.rules.TrapDurationMS == 0 && engine.rules.VirtualTrapDurationMS == 0 {
 		return nil
 	}
-	events := make([]Event, 0)
+	// This is an explicit offline tie convention, not a recovered native
+	// callback ordering. Resolve every death at the same deadline before
+	// deciding the winner, so equal expirations cannot award a PlayerID win.
+	// Different deadlines still settle chronologically, even within one tick.
+	expiring := make([]int, 0, len(engine.actors))
 	for index := range engine.actors {
 		actor := &engine.actors[index]
 		if actor.State == ActorTrapped && actor.TrapExpiresAt != 0 && actor.TrapExpiresAt <= engine.elapsedMS {
-			events = append(events, engine.eliminateActor(index, actor.TrappedBy, EliminationTrapDeath)...)
-			// Live clients confirm syrup deaths one message at a time and the
-			// authoritative runtime evaluates the winner after every confirmation.
-			// Preserve that ordering in fixed-step simulations as well: batching all
-			// expirations before one terminal check invented simultaneous-elimination
-			// draws that the live protocol can never produce.
-			if event, ended := engine.evaluateTerminal(); ended {
-				events = append(events, event)
-				break
-			}
+			expiring = append(expiring, index)
 		}
+	}
+	sort.SliceStable(expiring, func(i, j int) bool {
+		return engine.actors[expiring[i]].TrapExpiresAt < engine.actors[expiring[j]].TrapExpiresAt
+	})
+	events := make([]Event, 0)
+	for start := 0; start < len(expiring); {
+		deadline := engine.actors[expiring[start]].TrapExpiresAt
+		end := start + 1
+		for end < len(expiring) && engine.actors[expiring[end]].TrapExpiresAt == deadline {
+			end++
+		}
+		for _, index := range expiring[start:end] {
+			events = append(events, engine.eliminateActor(index, engine.actors[index].TrappedBy, EliminationTrapDeath)...)
+		}
+		if event, ended := engine.evaluateTerminal(); ended {
+			events = append(events, event)
+			break
+		}
+		start = end
 	}
 	return events
 }

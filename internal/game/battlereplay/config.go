@@ -50,10 +50,6 @@ func ConfigFromRecording(catalog *mapdata.Catalog, recording qbv.Recording, opti
 	if begin.MapHash != entry.MapHash {
 		return Projection{}, fmt.Errorf("QBV GAME_BEGIN map %d hash %q does not match installed hash %q", begin.MapID, begin.MapHash, entry.MapHash)
 	}
-	if len(begin.Items) != 0 {
-		return Projection{}, fmt.Errorf("QBV GAME_BEGIN map %d has %d expanded Items types, which the restricted replay engine does not model", begin.MapID, len(begin.Items))
-	}
-
 	participants := make([]battleengine.Participant, len(begin.Players))
 	for index, player := range begin.Players {
 		if len(player.NewItems) != 0 {
@@ -83,6 +79,10 @@ func ConfigFromRecording(catalog *mapdata.Catalog, recording qbv.Recording, opti
 	for index, item := range begin.NewItems {
 		recordedWallItems[index] = mapdata.CompetitiveWallItem{SceneID: item.ItemID, Quantity: item.Quantity}
 	}
+	recordedDelayedItems := make([]mapdata.CompetitiveWallItem, len(begin.Items))
+	for index, item := range begin.Items {
+		recordedDelayedItems[index] = mapdata.CompetitiveWallItem{SceneID: item.ItemID, Quantity: item.Quantity}
+	}
 	config, err := battleengine.ConfigFromCompetitiveMap(entry, battleengine.CompetitiveMapConfigOptions{
 		SpawnSeed: begin.SpawnSeed,
 		ItemSeed:  begin.ItemSeed,
@@ -93,6 +93,7 @@ func ConfigFromRecording(catalog *mapdata.Catalog, recording qbv.Recording, opti
 		},
 		Participants:         participants,
 		RecordedWallItems:    recordedWallItems,
+		RecordedDelayedItems: recordedDelayedItems,
 		UseRecordedWallItems: true,
 	})
 	if err != nil {

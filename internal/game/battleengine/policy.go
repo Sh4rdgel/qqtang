@@ -117,7 +117,7 @@ func (runtime *Runtime) VirtualPlayerIDs() []uint16 {
 }
 
 // SuspendVirtualActor installs or removes a live-authority quarantine without
-// changing deterministic actor state. While suspended, StepWithTrace applies
+// committing the hit outcome. While suspended, StepWithTrace applies
 // a neutral action and does not invoke the policy. The live adapter uses this
 // boundary after publishing an actor-hit request: the native scene has already
 // stopped that participant, but the fixed mirror must remain Active until the
@@ -130,12 +130,33 @@ func (runtime *Runtime) SuspendVirtualActor(playerID uint16, suspended bool) err
 	if index < 0 || runtime.engine.actors[index].Source != ParticipantVirtualAI {
 		return fmt.Errorf("battle runtime suspension player %d is not virtual", playerID)
 	}
+	runtime.engine.actors[index].nativeHitPending = suspended
 	if suspended {
 		runtime.suspendedVirtual[playerID] = struct{}{}
 	} else {
 		delete(runtime.suspendedVirtual, playerID)
 	}
 	return nil
+}
+
+// SuspendVirtualActorAtHit stops the missing native client's movement at its
+// FA5 checkpoint without speculating about the authoritative hit outcome.
+func (runtime *Runtime) SuspendVirtualActorAtHit(playerID uint16, position Position) error {
+	if runtime == nil || runtime.engine == nil {
+		return fmt.Errorf("battle runtime is nil")
+	}
+	index := runtime.engine.actorIndex(playerID)
+	if index < 0 || runtime.engine.actors[index].Source != ParticipantVirtualAI {
+		return fmt.Errorf("battle runtime hit player %d is not virtual", playerID)
+	}
+	if err := runtime.engine.ApplyVerifiedMovementCheckpoint(playerID, position); err != nil {
+		return err
+	}
+	actor := &runtime.engine.actors[index]
+	actor.Facing = DirectionDown
+	actor.nativePreviousPosition = position
+	actor.moveRemainder = 0
+	return runtime.SuspendVirtualActor(playerID, true)
 }
 
 func (runtime *Runtime) VirtualActorSuspended(playerID uint16) bool {

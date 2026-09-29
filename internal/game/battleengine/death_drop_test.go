@@ -46,10 +46,12 @@ func TestEliminationScattersHeldActionsIntoAuthoritativeWorld(t *testing.T) {
 }
 
 func TestVerifiedHumanEliminationUsesNativeDropCellsWithoutReroll(t *testing.T) {
-	engine := mustEngine(t, testConfig())
+	config := testConfig()
+	config.Grid = testOpenGrid(15, 13)
+	engine := mustEngine(t, config)
 	want := []Pickup{
 		{SceneID: 21, Cell: Cell{Row: 0, Col: 2}, State: PickupAvailable},
-		{SceneID: 25, Cell: Cell{Row: 2, Col: 2}, State: PickupAvailable},
+		{SceneID: 25, Cell: Cell{Row: 12, Col: 14}, State: PickupAvailable},
 	}
 	events, err := engine.ApplyVerifiedElimination(engine.actors[0].PlayerID, engine.actors[1].PlayerID, want)
 	if err != nil {
@@ -116,19 +118,96 @@ func TestRuleOneDeathDropsAccumulatedBasicPickupsBeforeHeldActions(t *testing.T)
 	}
 }
 
-func TestPickupCollectionRecordsRawNativeDeathDeltaAtAttributeCap(t *testing.T) {
+func TestRuleOneDeathDropsUseWholeMapWithoutLocalTruncation(t *testing.T) {
+	config := testConfig()
+	config.Grid = testOpenGrid(15, 13)
+	origin := Cell{Row: 6, Col: 7}
+	config.Participants[0].Spawn = origin
+	engine := mustEngine(t, config)
+	actor := &engine.actors[0]
+	actor.State = ActorTrapped
+	actor.nativeBasicPickupDelta = [3]int16{10, 10, 10}
+
+	events, err := engine.ConfirmTrappedDeath(actor.PlayerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countEventKind(events, EventPickupDropped); got != 30 {
+		t.Fatalf("drop events = %d, want all 30 despite only 24 local empty cells", got)
+	}
+	counts := make(map[uint32]int)
+	seen := make(map[Cell]bool)
+	outsideLocalArea := false
+	for _, drop := range engine.pickups {
+		if seen[drop.Cell] || drop.Cell == origin || drop.Cell == config.Participants[1].Spawn {
+			t.Fatalf("drop on duplicate or occupied cell: %+v", drop)
+		}
+		if _, inside := config.Grid.Cell(drop.Cell); !inside {
+			t.Fatalf("drop outside map: %+v", drop)
+		}
+		seen[drop.Cell] = true
+		counts[drop.SceneID]++
+		if drop.Cell.Row < origin.Row-2 || drop.Cell.Row > origin.Row+2 ||
+			drop.Cell.Col < origin.Col-2 || drop.Cell.Col > origin.Col+2 {
+			outsideLocalArea = true
+		}
+	}
+	for _, sceneID := range []uint32{SceneBombCapacitySmall, SceneBombPowerSmall, SceneSpeedSmall} {
+		if counts[sceneID] != 10 {
+			t.Fatalf("scene %d drops = %d, want 10", sceneID, counts[sceneID])
+		}
+	}
+	if !outsideLocalArea {
+		t.Fatal("ordinary-rule drops are still restricted to a local 5x5 area")
+	}
+}
+
+func TestBasicPickupCollectionRecordsRawNativeDeathDeltaAtAttributeCap(t *testing.T) {
 	config := testConfig()
 	config.Participants[0].MaxBombCapacity = config.Participants[0].BombCapacity
 	engine := mustEngine(t, config)
 	actor := &engine.actors[0]
-	pickup := Pickup{SceneID: SceneBombCapacityLarge, Cell: actor.Position.Cell(), State: PickupAvailable}
+	pickup := Pickup{SceneID: SceneBombCapacitySmall, Cell: actor.Position.Cell(), State: PickupAvailable}
 	before := actor.BombCapacity
 	engine.collectPickup(actor, &pickup)
 	if actor.BombCapacity != before {
 		t.Fatalf("capped capacity changed from %d to %d", before, actor.BombCapacity)
 	}
-	if got := actor.nativeBasicPickupDelta[0]; got != 8 {
-		t.Fatalf("native capacity pickup delta = %d, want raw +8", got)
+	if got := actor.nativeBasicPickupDelta[0]; got != 1 {
+		t.Fatalf("native basic capacity pickup delta = %d, want raw +1", got)
+	}
+}
+
+func TestUpperAttributeItemsDoNotBecomeBasicDeathDrops(t *testing.T) {
+	for _, basicFirst := range []bool{false, true} {
+		config := testConfig()
+		config.Grid = testOpenGrid(15, 13)
+		engine := mustEngine(t, config)
+		actor := &engine.actors[0]
+		if basicFirst {
+			engine.collectPickup(actor, &Pickup{SceneID: SceneSpeedSmall, Cell: actor.Position.Cell(), State: PickupAvailable})
+		}
+		for _, scene := range []uint32{SceneBombCapacityLarge, SceneBombPowerLarge, SceneSpeedLarge} {
+			engine.collectPickup(actor, &Pickup{SceneID: scene, Cell: actor.Position.Cell(), State: PickupAvailable})
+		}
+		if actor.BombCapacity != actor.MaxBombCapacity || actor.BombPower != actor.MaxBombPower || actor.SpeedRate != actor.MaxSpeedRate {
+			t.Fatal("upper attribute effect was lost")
+		}
+		actor.State = ActorTrapped
+		events, err := engine.ConfirmTrappedDeath(actor.PlayerID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := 0
+		if basicFirst {
+			want = 1
+		}
+		if countEventKind(events, EventPickupDropped) != want {
+			t.Fatalf("basicFirst=%t: upper items manufactured basic drops: %+v", basicFirst, events)
+		}
+		if want == 1 && engine.pickups[0].SceneID != SceneSpeedSmall {
+			t.Fatal("ordinary collected shoe was not preserved")
+		}
 	}
 }
 

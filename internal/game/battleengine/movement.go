@@ -77,6 +77,12 @@ func (engine *Engine) resolveNativeMovementDisplacement(actor *Actor, direction 
 		X: start.X + dx*int32(distance),
 		Y: start.Y + dy*int32(distance),
 	}
+	// Native movement first queries the current centre cell with direction|0x80.
+	// Destination leading-edge probes alone miss the closed exit of a corner.
+	if tile, inside := engine.grid.Cell(start.Cell()); inside && tile.NativeGridAttrSet &&
+		!engine.actorCapabilities(actor, direction).TraverseStaticTerrain && !tile.PlayerExitPassable(direction) {
+		return false
+	}
 	blockedCandidate, blocked := engine.nativeMovementSegmentCollision(actor, start, direction, distance)
 	if !blocked {
 		actor.Position = candidate
@@ -338,6 +344,9 @@ func (engine *Engine) ApplyVerifiedMapElementMovement(playerID uint16, elementID
 	if engine.outcome.Ended {
 		return Event{}, fmt.Errorf("battle has already ended")
 	}
+	if _, _, ok := direction.delta(); !ok || direction == DirectionNone {
+		return Event{}, fmt.Errorf("invalid map-element movement direction %d", direction)
+	}
 	actorIndex := engine.actorIndex(playerID)
 	if actorIndex < 0 {
 		return Event{}, fmt.Errorf("map-element movement player %d is not a participant", playerID)
@@ -349,11 +358,10 @@ func (engine *Engine) ApplyVerifiedMapElementMovement(playerID uint16, elementID
 	if event, moved := engine.relocateMapElement(playerID, source, direction, false); moved {
 		return event, nil
 	}
-	capabilities := engine.actorCapabilities(&engine.actors[actorIndex], direction)
-	if capabilities.CanPushBreakable {
-		if event, moved := engine.relocateMapElement(playerID, source, direction, true); moved {
-			return event, nil
-		}
+	// The authority validated the producer at event time. Its confirmed map
+	// mutation remains valid after the pushing actor's panda form expires.
+	if event, moved := engine.relocateMapElement(playerID, source, direction, true); moved {
+		return event, nil
 	}
 	return Event{}, fmt.Errorf("map-element %d cannot move from %d,%d in direction %d", elementID, source.Row, source.Col, direction)
 }
@@ -367,9 +375,8 @@ func (engine *Engine) canRequestMapElementPush(source Cell, direction Direction,
 		return false
 	}
 	// FUN_0060cac9 validates exactly the cell one step beyond the contacted
-	// map-element cell. It does not treat overlap with the element's old
-	// footprint as free. That distinction prevents a 2x1 element from moving
-	// along its long axis, matching the original client's producer gate.
+	// map-element cell. The separate native map-manager size restriction is
+	// enforced by pushableMapElement before either a request or a confirmed move.
 	target := Cell{Row: source.Row + int16(dy), Col: source.Col + int16(dx)}
 	targetTile, inside := engine.grid.Cell(target)
 	if !inside || targetTile.MapElementOccupied || targetTile.MapElementID != 0 || engine.bombAt(target) >= 0 {
@@ -399,7 +406,11 @@ func (engine *Engine) pushableMapElement(source Cell, pandaPredicate bool) (Tile
 	if pandaPredicate {
 		eligible = sourceTile.PandaPushable
 	}
-	if !inside || !eligible || sourceTile.MapElementID == 0 || sourceTile.ElementWidth == 0 || sourceTile.ElementHeight == 0 {
+	// FUN_005d8900 is called by the 0xFB3 consumer before updating occupancy
+	// or animating a move. It requires width<2 and height<2. Apply this even to
+	// externally constructed grids: canMove=2 alone does not make a 2x1 pig
+	// bed movable, and an arbitrator notification can still be a native no-op.
+	if !inside || !eligible || sourceTile.MapElementID == 0 || sourceTile.ElementWidth != 1 || sourceTile.ElementHeight != 1 {
 		return Tile{}, nil, false
 	}
 	anchor := sourceTile.ElementAnchor
@@ -726,7 +737,7 @@ func (engine *Engine) nativeCornerSideCellPassable(actor *Actor, direction Direc
 		return false
 	}
 	capabilities := engine.actorCapabilities(actor, direction)
-	return capabilities.TraverseStaticTerrain || tile.Kind == CellOpen
+	return capabilities.TraverseStaticTerrain || tile.PlayerPassable(direction)
 }
 
 func positiveRemainder(value int32, modulus int32) int32 {
@@ -776,7 +787,7 @@ func (engine *Engine) nativePointCollision(actor *Actor, point Position, directi
 	if engine.bombAt(cell) >= 0 && (actor.NativePassActive || nativeDynamicBoundaryBlocks(point, direction)) {
 		return cell, nativeCollisionDynamicTypeOne
 	}
-	if !capabilities.TraverseStaticTerrain && tile.Kind != CellOpen {
+	if !capabilities.TraverseStaticTerrain && !tile.PlayerPassable(direction) {
 		return cell, nativeCollisionStatic
 	}
 	return cell, nativeCollisionNone
@@ -814,7 +825,7 @@ func (engine *Engine) nativeCellBeyondPassable(actor *Actor, collisionCell Cell,
 		return false
 	}
 	capabilities := engine.actorCapabilities(actor, direction)
-	if !capabilities.TraverseStaticTerrain && tile.Kind != CellOpen {
+	if !capabilities.TraverseStaticTerrain && !tile.PlayerPassable(direction) {
 		return false
 	}
 	// The active branch in FUN_005b7999 advances the collided grid coordinate

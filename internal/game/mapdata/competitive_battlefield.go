@@ -36,8 +36,16 @@ type CompetitiveBattlefield struct {
 type CompetitiveBattleCell struct {
 	Collision     CompetitiveCellCollision
 	FlamePassable bool
+	// NativeGridAttr preserves the full per-cell bitfield. Player directions
+	// occupy bits 0..3; flame directions occupy bits 8..11 (005ef1aa/005ef20f).
+	NativeGridAttr    uint32
+	NativeGridAttrSet bool
+	// FUN_005cfc10 queries only scene+0xe2c (serialized layer zero) at
+	// the actor's origin. Destination collision still checks both layers.
+	NativePlayerExitAttr    uint32
+	NativePlayerExitAttrSet bool
 	// MapElementOccupied is independent of actor traversal. Client.exe first
-	// uses GridAttr bit 0 to decide whether an actor may enter this cell, but
+	// uses GridAttr bits 0..3 for directional actor traversal, but
 	// its local bubble producer separately rejects every cell for which the
 	// static map-element lookup returns an object.
 	MapElementOccupied bool
@@ -204,7 +212,8 @@ func parseCompetitiveBattlefield(elements map[uint32]competitiveMapElement, mapB
 	cellCount := int(width * height)
 	field := CompetitiveBattlefield{Width: uint16(width), Height: uint16(height), Cells: make([]CompetitiveBattleCell, cellCount)}
 	for index := range field.Cells {
-		field.Cells[index] = CompetitiveBattleCell{Collision: CompetitiveCellOpen, FlamePassable: true}
+		field.Cells[index] = CompetitiveBattleCell{Collision: CompetitiveCellOpen, FlamePassable: true,
+			NativePlayerExitAttr: 15, NativePlayerExitAttrSet: true}
 	}
 	layerBytes := cellCount * 4
 	if headerSize+2*layerBytes > len(mapBytes) {
@@ -231,7 +240,12 @@ func parseCompetitiveBattlefield(elements map[uint32]competitiveMapElement, mapB
 					// by treating the positive anchor cell as solid. Its unknown
 					// footprint cannot be inferred from negative editor markers. The
 					// restricted rule-1 engine never assigns behaviour to it.
-					field.Cells[row*int(width)+col] = CompetitiveBattleCell{Collision: CompetitiveCellSolid, MapElementOccupied: true}
+					previous := field.Cells[row*int(width)+col]
+					if layer == 0 {
+						previous.NativePlayerExitAttr = 0
+					}
+					field.Cells[row*int(width)+col] = CompetitiveBattleCell{Collision: CompetitiveCellSolid, MapElementOccupied: true,
+						NativePlayerExitAttr: previous.NativePlayerExitAttr, NativePlayerExitAttrSet: true}
 					continue
 				}
 				for localRow := 0; localRow < element.height; localRow++ {
@@ -240,31 +254,42 @@ func parseCompetitiveBattlefield(elements map[uint32]competitiveMapElement, mapB
 						if targetRow >= int(height) || targetCol >= int(width) {
 							return CompetitiveBattlefield{}, fmt.Errorf("map element %d at %d,%d exceeds %dx%d", raw, row, col, width, height)
 						}
-						// mapElem.py documents the low flags in this order:
-						// player traversal, player occlusion, flame traversal and
-						// flame occlusion. Visual occlusion remains client-owned.
+						// The Python comment names four groups, not four individual
+						// bits. Native movement/flame methods select a direction bit.
 						attr := element.gridAttrs[localRow*element.width+localCol]
 						// FUN_005d839c writes the object pointer and attributes into
 						// every footprint cell. A later positive anchor replaces the
 						// earlier pointer at overlapping cells, so native row-major
 						// installation is last-writer-wins rather than a union of
 						// collision flags.
-						projected := CompetitiveBattleCell{MapElementOccupied: true, FlamePassable: attr&(1<<2) != 0}
-						if attr&1 == 0 {
+						projected := CompetitiveBattleCell{MapElementOccupied: true, FlamePassable: attr&0xf00 != 0, NativeGridAttr: attr, NativeGridAttrSet: true}
+						projected.NativePlayerExitAttr = field.Cells[targetRow*int(width)+targetCol].NativePlayerExitAttr
+						projected.NativePlayerExitAttrSet = true
+						if layer == 0 {
+							projected.NativePlayerExitAttr = attr
+						}
+						// LifeTime is independent of player traversal. Grass (for
+						// example element 6003) is both walkable and destructible.
+						if element.lifeTime > 0 {
+							projected.Durability = byte(element.lifeTime)
+						}
+						if attr&0xf == 0 {
 							projected.Collision = CompetitiveCellSolid
 							if element.lifeTime > 0 {
 								projected.Collision = CompetitiveCellBreakable
-								projected.Durability = byte(element.lifeTime)
 							}
 						}
 						// Client.exe exposes two independent map-element predicates to
 						// the push producer. A normal actor takes the map-element vtable
 						// +0x38 path (canMove bit 1, numeric value 2), while Panda avatar
-						// 44 takes +0x34 (LifeTime>=0). 0xFB3 moves the complete
-						// configured footprint from its positive anchor.
-						normalPushable := attr&1 == 0 && element.canMove&2 != 0
-						pandaPushable := attr&1 == 0 && element.lifeTime >= 0
-						if normalPushable || pandaPushable {
+						// 44 takes +0x34 (LifeTime>=0). Those producer predicates are
+						// insufficient: FUN_005d8900 rejects any footprint wider or
+						// taller than one cell, including after a 0xFB3 confirmation.
+						// Pig bed 9008 has canMove=2 but is 2x1 and stays occupied.
+						movableSize := element.width == 1 && element.height == 1
+						normalPushable := movableSize && attr&0xf == 0 && element.canMove&2 != 0
+						pandaPushable := movableSize && attr&0xf == 0 && element.lifeTime >= 0
+						if normalPushable || pandaPushable || element.lifeTime > 0 {
 							projected.MapElementID = element.id
 							projected.NormalPushable = normalPushable
 							projected.PandaPushable = pandaPushable

@@ -62,18 +62,12 @@ func (server *Server) newCompetitiveGameData(session *connectionSession, selecte
 		}
 	}
 	objectiveItems := selectedMap.CompetitiveObjectiveSceneItems(largestTeam, itemSeed)
-	wallCapacity := len(selectedMap.HiddenItemCells)
-	var rolledWallItems []mapdata.CompetitiveWallItem
-	if bossEnabled {
-		rolledWallItems = selectedMap.RollFinalCompetitiveBossWallItems(
-			itemSeed, len(participants), wallCapacity, wallCapacity/2,
-		)
-	} else {
-		rolledWallItems = selectedMap.RollFinalCompetitiveOrdinaryWallItems(
-			itemSeed, len(participants), wallCapacity, wallCapacity/2,
-		)
+	roles := make([]uint16, len(participants))
+	for index, participant := range participants {
+		roles[index] = uint16(participant.RoleID)
 	}
-	wallItems := mergeCompetitiveSceneItems(rolledWallItems, objectiveItems)
+	supply := selectedMap.PlanCompetitiveSupply(itemSeed, roles, bossEnabled)
+	wallItems := mergeCompetitiveSceneItems(supply.WallItems, objectiveItems)
 	return game.NewGameBeginData(game.GameBeginOptions{
 		GameID: session.CurrentGameID, MapID: selectedMap.ID,
 		SpawnSeed: spawnSeed, ItemSeed: itemSeed, ArbitratorPlayerID: arbitratorID,
@@ -84,6 +78,9 @@ func (server *Server) newCompetitiveGameData(session *connectionSession, selecte
 		// ItemSeed and embedded wall positions, so the server still does not
 		// invent coordinates.
 		NewItems: wallItems,
+		// The native arbitrator schedules this finite pool and dispatches it
+		// through the bird. The server must not run a second periodic producer.
+		Items: mergeCompetitiveSceneItems(supply.DelayedItems),
 	})
 }
 

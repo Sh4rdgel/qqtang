@@ -420,7 +420,7 @@ func New(config Config) (*Server, error) {
 			SharedLibraryPath: config.CompetitiveAI.SharedLibraryPath,
 			IntraOpThreads:    config.CompetitiveAI.IntraOpThreads,
 			InterOpThreads:    config.CompetitiveAI.InterOpThreads,
-			NativePolicyConfig: battleai.NativePolicyConfig{
+			ActorPolicyConfig: battleai.ActorPolicyConfig{
 				DangerHorizonMS: 3_500,
 				DecisionMS:      config.CompetitiveAI.TickMS,
 				EnableSearch:    config.CompetitiveAI.SearchEnabled,

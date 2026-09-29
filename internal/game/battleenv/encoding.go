@@ -13,11 +13,13 @@ import (
 )
 
 const (
-	// Schema 15 separates one-shot damage forecasts from visible flame residue.
-	// Shapes and physics are unchanged; danger/refuge values are corrected.
-	TensorSchemaVersion uint16 = 15
-	SpatialChannels            = 91
-	ScalarFeatures             = 182
+	// Schema 18 appends visible item identity and effective self capabilities.
+	// Both schema 14 and 17 input prefixes retain their original semantics.
+	TensorSchemaVersion    uint16 = 18
+	LegacySpatialChannels         = 91
+	TerrainSpatialChannels        = 101
+	SpatialChannels               = 117
+	ScalarFeatures                = 187
 )
 
 const (
@@ -29,6 +31,19 @@ const (
 	pickupAttributeAmountChannel = 82
 	pickupEffectiveGainChannel   = 83
 	pickupActionChannelStart     = 84
+	playerEntryChannelStart      = 91 // Up, Right, Down, Left
+	flameEntryChannelStart       = 95 // Up, Right, Down, Left
+	terrainDurabilityChannel     = 99
+	terrainOccupiedChannel       = 100
+	pickupTransformationStart    = 101 // eight native forms, same order as 26..33
+	pickupQuestionChannel        = 109
+	pickupDetectorChannel        = 110
+	pickupTemporarySpeedChannel  = 111
+	pickupInventoryGainChannel   = 112
+	pickupCollectableChannel     = 113 // visible detector contents can still be hidden
+	selfEffectiveCapacityChannel = 114
+	selfHorizontalSpeedChannel   = 115 // native pixels/sec, includes status overrides
+	selfVerticalSpeedChannel     = 116
 )
 
 const (
@@ -40,6 +55,8 @@ const (
 	CurriculumDevelopment
 	CurriculumLateDuelReplay
 	CurriculumNativePass
+	CurriculumRollingPressure
+	CurriculumBubbleField
 )
 
 // TensorBatch is a channel-first, fixed-shape actor input. Layout is
@@ -176,6 +193,20 @@ func encodeActor(tensors *TensorBatch, envIndex, actorIndex int, observation bat
 			cell := battleengine.Cell{Row: int16(row), Col: int16(col)}
 			tile, _ := observation.Grid.Cell(cell)
 			set(0, cell, 1)
+			for direction := battleengine.DirectionUp; direction <= battleengine.DirectionLeft; direction++ {
+				if tile.PlayerPassable(direction) {
+					set(playerEntryChannelStart+int(direction-battleengine.DirectionUp), cell, 1)
+				}
+				if tile.FlamePassableIn(direction) {
+					set(flameEntryChannelStart+int(direction-battleengine.DirectionUp), cell, 1)
+				}
+			}
+			// Retain walkable destructibles on the legacy durability scale.
+			// This contains no hidden wall-item allocation.
+			set(terrainDurabilityChannel, cell, float32(tile.Durability)/4)
+			if tile.MapElementOccupied {
+				set(terrainOccupiedChannel, cell, 1)
+			}
 			// Channels 75..79 broadcast only public lobby/scoreboard facts:
 			// own initial/alive team size, active enemy-team count, largest
 			// active enemy coalition, and total active teams. Without these a
@@ -193,8 +224,9 @@ func encodeActor(tensors *TensorBatch, envIndex, actorIndex int, observation bat
 			case battleengine.CellOpen:
 				// A native map element may occupy a collision-open grid cell.
 				// Channel 1 denotes unoccupied floor suitable for placement.
-				// Player movement still follows Kind and may cross an occupied
-				// CellOpen tile, matching the native GridAttr traversal bit.
+				// CellOpen means at least one native movement direction is open.
+				// Exact direction limits feed Legal and tactical route/refuge
+				// projections; this legacy plane is only a placement summary.
 				if !tile.MapElementOccupied {
 					set(1, cell, 1)
 				}
@@ -203,6 +235,8 @@ func encodeActor(tensors *TensorBatch, envIndex, actorIndex int, observation bat
 			case battleengine.CellSolid:
 				set(3, cell, 1)
 			}
+			// Legacy channel 4 is an any-direction summary. Danger channels
+			// use the engine's directional flame projection, not this summary.
 			if tile.FlamePassable {
 				set(4, cell, 1)
 			}
@@ -351,13 +385,18 @@ func encodeActor(tensors *TensorBatch, envIndex, actorIndex int, observation bat
 	for _, pickup := range observation.Pickups {
 		set(pickupChannel(pickup.SceneID), pickup.Cell, 1)
 		setVisiblePickupFacts(set, pickup, self)
+		setVisibleItemSemantics(set, pickup, self)
 	}
+	set(selfEffectiveCapacityChannel, self.Cell, float32(self.Capabilities.EffectiveBombCapacity)/8)
+	set(selfHorizontalSpeedChannel, self.Cell, float32(self.HorizontalSpeedPixelsPerSecond)/520)
+	set(selfVerticalSpeedChannel, self.Cell, float32(self.VerticalSpeedPixelsPerSecond)/520)
 
 	scalarBase := ((envIndex * tensors.ParticipantCount) + actorIndex) * ScalarFeatures
 	scalars := tensors.Scalars[scalarBase : scalarBase+ScalarFeatures]
 	setScalarFeatures(scalars, observation, self)
 	setVisibleTacticalRouteFeatures(scalars, observation, self)
 	setTacticalConsequenceFeatures(scalars, consequences)
+	setOpeningConnectivityFeatures(scalars, observation, self)
 	legalBase := ((envIndex * tensors.ParticipantCount) + actorIndex) * int(battleengine.DiscreteActionCount)
 	for id, allowed := range legal {
 		if allowed {
@@ -368,6 +407,117 @@ func encodeActor(tensors *TensorBatch, envIndex, actorIndex int, observation bat
 		tensors.Active[envIndex*tensors.ParticipantCount+actorIndex] = 1
 	}
 	return nil
+}
+
+// setOpeningConnectivityFeatures exposes only facts that the actor can derive
+// from its public native observation. The freely traversable component stops
+// at breakable and pushable terrain, so a policy can distinguish ordinary
+// movement from an opening that first requires demolition or pushing.
+func setOpeningConnectivityFeatures(values []float32, observation battleengine.Observation, self battleengine.ActorObservation) {
+	if len(values) != ScalarFeatures {
+		panic("invalid scalar feature storage")
+	}
+	const base = 182
+	width, height := int(observation.Grid.Width), int(observation.Grid.Height)
+	cellCount := width * height
+	if width == 0 || height == 0 || len(observation.Grid.Cells) != cellCount {
+		return
+	}
+	indexOf := func(cell battleengine.Cell) (int, bool) {
+		if cell.Row < 0 || cell.Col < 0 || int(cell.Row) >= height || int(cell.Col) >= width {
+			return 0, false
+		}
+		return int(cell.Row)*width + int(cell.Col), true
+	}
+	start, ok := indexOf(self.Cell)
+	if !ok {
+		return
+	}
+
+	scratch := acquireTacticalRouteScratch(cellCount)
+	defer releaseTacticalRouteScratch(scratch)
+	for index, tile := range observation.Grid.Cells {
+		scratch.passable[index] = self.Capabilities.TraverseStaticTerrain || tile.Kind == battleengine.CellOpen
+	}
+	for _, bomb := range observation.Bombs {
+		if index, inside := indexOf(bomb.Cell); inside {
+			scratch.passable[index] = false
+		}
+	}
+	// Contact fields may slow, slide or trap an actor; they do not occupy
+	// solid movement space. Connectivity describes geometry, not safety.
+	// The owner may leave the cell of its newly placed bomb.
+	scratch.passable[start] = true
+	queue := append(scratch.queue, start)
+	scratch.visited[start] = true
+	for head := 0; head < len(queue); head++ {
+		index := queue[head]
+		row, col := index/width, index%width
+		for directionIndex, delta := range tacticalDirectionDeltas {
+			nextRow, nextCol := row+delta.row, col+delta.col
+			if nextRow < 0 || nextCol < 0 || nextRow >= height || nextCol >= width {
+				continue
+			}
+			next := nextRow*width + nextCol
+			if scratch.visited[next] || !scratch.passable[next] {
+				continue
+			}
+			direction := battleengine.Direction(directionIndex) + battleengine.DirectionUp
+			if !self.Capabilities.TraverseStaticTerrain &&
+				(!observation.Grid.Cells[index].PlayerExitPassable(direction) || !observation.Grid.Cells[next].PlayerPassable(direction)) {
+				continue
+			}
+			scratch.visited[next] = true
+			queue = append(queue, next)
+		}
+	}
+
+	breakableBoundary := scratch.targets[0]
+	pushableBoundary := scratch.targets[1]
+	breakableCount, pushableCount := 0, 0
+	for index, reached := range scratch.visited {
+		if !reached {
+			continue
+		}
+		row, col := index/width, index%width
+		for _, delta := range tacticalDirectionDeltas {
+			nextRow, nextCol := row+delta.row, col+delta.col
+			if nextRow < 0 || nextCol < 0 || nextRow >= height || nextCol >= width {
+				continue
+			}
+			next := nextRow*width + nextCol
+			tile := observation.Grid.Cells[next]
+			pushable := tile.NormalPushable || (self.Capabilities.CanPushBreakable && tile.PandaPushable)
+			switch {
+			case pushable && !pushableBoundary[next]:
+				pushableBoundary[next] = true
+				pushableCount++
+			case tile.Kind == battleengine.CellBreakable && !breakableBoundary[next]:
+				breakableBoundary[next] = true
+				breakableCount++
+			}
+		}
+	}
+
+	activeEnemy, reachableEnemy := false, false
+	for _, actor := range observation.Actors {
+		if actor.PlayerID == self.PlayerID || actor.TeamID == self.TeamID || actor.State == battleengine.ActorEliminated {
+			continue
+		}
+		activeEnemy = true
+		if index, inside := indexOf(actor.Cell); inside && scratch.visited[index] {
+			reachableEnemy = true
+		}
+	}
+	values[base] = safeRatio(float32(len(queue)), float32(cellCount))
+	if reachableEnemy {
+		values[base+1] = 1
+	}
+	if activeEnemy {
+		values[base+2] = 1
+	}
+	values[base+3] = safeRatio(float32(breakableCount), float32(cellCount))
+	values[base+4] = safeRatio(float32(pushableCount), float32(cellCount))
 }
 
 func setVisiblePickupFacts(
@@ -644,11 +794,12 @@ const (
 )
 
 // visibleTacticalRoutes performs one stable BFS for all global candidates.
-// It never inspects the engine's hidden pickup allocation. Bombs and placed
-// field objects are treated as current dynamic blockers, while native
+// It never inspects the engine's hidden pickup allocation. Bombs are treated
+// as current dynamic blockers; contact fields are not solid walls. Native
 // pushable terrain remains a reachable (possibly slower) route. The duck's
 // public traversal capability permits static terrain but still excludes
-// dynamic objects and suppresses impossible pickup collection targets.
+// bubbles and suppresses impossible pickup collection targets. A geometric
+// route is not a promise of safe passage through contact effects.
 func visibleTacticalRoutes(observation battleengine.Observation, self battleengine.ActorObservation) [tacticalRouteCount]tacticalRoute {
 	var result [tacticalRouteCount]tacticalRoute
 	width, height := int(observation.Grid.Width), int(observation.Grid.Height)
@@ -680,13 +831,8 @@ func visibleTacticalRoutes(observation battleengine.Observation, self battleengi
 			passable[index] = false
 		}
 	}
-	for _, object := range observation.FieldObjects {
-		if index, inside := indexOf(object.Cell); inside {
-			passable[index] = false
-		}
-	}
-	// An actor may legally leave the cell of a newly placed bomb or field
-	// object. Keep that native pass-through origin in the BFS.
+	// An actor may legally leave the cell of a newly placed bomb. Keep
+	// that native pass-through origin in the BFS.
 	passable[startIndex] = true
 
 	targets := &scratch.targets
@@ -715,7 +861,7 @@ func visibleTacticalRoutes(observation battleengine.Observation, self battleengi
 	}
 	if !self.Capabilities.TraverseStaticTerrain {
 		for index, tile := range observation.Grid.Cells {
-			if tile.Kind != battleengine.CellBreakable {
+			if tile.Durability == 0 {
 				continue
 			}
 			row, col := index/width, index%width
@@ -751,6 +897,15 @@ func visibleTacticalRoutes(observation battleengine.Observation, self battleengi
 			next := nextRow*width + nextCol
 			if visited[next] || !passable[next] {
 				continue
+			}
+			worldDirection := battleengine.Direction(directionIndex) + battleengine.DirectionUp
+			if !self.Capabilities.TraverseStaticTerrain {
+				currentTile, nextTile := observation.Grid.Cells[index], observation.Grid.Cells[next]
+				canPushNext := nextTile.NormalPushable || (self.Capabilities.CanPushBreakable && nextTile.PandaPushable)
+				canPushCurrent := currentTile.NormalPushable || (self.Capabilities.CanPushBreakable && currentTile.PandaPushable)
+				if (!currentTile.PlayerExitPassable(worldDirection) && !canPushCurrent) || (!nextTile.PlayerPassable(worldDirection) && !canPushNext) {
+					continue
+				}
 			}
 			visited[next] = true
 			distance[next] = distance[index] + 1

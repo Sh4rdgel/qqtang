@@ -131,7 +131,7 @@ func (engine *Engine) resolvePickupContacts() []Event {
 	events := make([]Event, 0)
 	for actorIndex := range engine.actors {
 		actor := &engine.actors[actorIndex]
-		if actor.State != ActorActive || actor.nativePreviousPosition.Cell() == actor.Position.Cell() || !engine.actorCapabilities(actor, actor.Facing).CanCollectItems {
+		if actor.State != ActorActive || actor.nativeHitPending || actor.nativePreviousPosition.Cell() == actor.Position.Cell() || !engine.actorCapabilities(actor, actor.Facing).CanCollectItems {
 			continue
 		}
 		// In a live mixed match, overlap is only an observation. The original
@@ -181,6 +181,7 @@ func (engine *Engine) collectPickup(actor *Actor, pickup *Pickup) Event {
 	event := Event{
 		Kind: EventPickupCollected, TimeMS: engine.elapsedMS, PlayerID: actor.PlayerID,
 		Cell: pickup.Cell, Position: actor.Position, SceneID: pickup.SceneID,
+		ItemChange: engine.beginItemChange(actor),
 	}
 	transformation, isTransformation := sceneelement.NativeTransformation(sceneelement.ID(pickup.SceneID))
 	battleAction, isBattleAction := sceneelement.NativeBattleActionPickup(sceneelement.ID(pickup.SceneID))
@@ -192,9 +193,14 @@ func (engine *Engine) collectPickup(actor *Actor, pickup *Pickup) Event {
 		event.AvatarRoleID = transformation.AvatarRoleID
 		event.EffectExpiresAt = actor.TransformationExpiresAt
 	case isBattleAction:
+		event.ValueBefore = actorHeldActionCount(actor, battleAction.ActionID)
 		grantHeldAction(actor, battleAction.ActionID, battleAction.Count)
+		event.ValueAfter = actorHeldActionCount(actor, battleAction.ActionID)
 		event.Effect = PickupEffectBattleAction
 		event.ActionID = battleAction.ActionID
+		// ActionCount remains the native grant request. Reward/diagnostic
+		// consumers use ValueAfter-ValueBefore: a full inventory or saturated
+		// stack can consume the scene item without granting its nominal count.
 		event.ActionCount = battleAction.Count
 	case isReward && reward.Kind == sceneelement.RewardMatchSugar && reward.DirectMatchAccumulator:
 		event.Effect = PickupEffectMatchSugar
@@ -238,10 +244,17 @@ func (engine *Engine) collectPickup(actor *Actor, pickup *Pickup) Event {
 	default:
 		attribute, amount, _ := supportedPickupEffect(pickup.SceneID)
 		event.Attribute = attribute
-		recordNativeBasicPickupDelta(actor, attribute, int8(amount))
+		// Scene 6/7/8 update separate native upper-item counters at
+		// +0x160/+0x174/+0x188 (005cd58f/005cd63d/005cd69f). Rule-1
+		// death inventory reads only +0x124/+0x138/+0x14c, so the upper
+		// item's attribute effect must not manufacture eight basic drops.
+		if pickup.SceneID >= SceneBombCapacitySmall && pickup.SceneID <= SceneSpeedSmall {
+			recordNativeBasicPickupDelta(actor, attribute, int8(amount))
+		}
 		event.ValueBefore, event.ValueAfter = engine.applyPickupAttributeDelta(actor, attribute, int8(amount))
 	}
 	pickup.State = PickupCollected
+	engine.finishItemChange(event.ItemChange, actor)
 	return event
 }
 
@@ -287,6 +300,7 @@ func (engine *Engine) ApplyVerifiedPickupAt(playerID uint16, sceneID uint32, pos
 	if err != nil {
 		return Event{}, err
 	}
+	engine.retirePendingPickupDispatchesAtCell(normalizedPosition.Cell())
 	if index := engine.verifiedPickupIndex(actor, sceneID, normalizedPosition); index >= 0 {
 		return engine.collectPickup(actor, &engine.pickups[index]), nil
 	}

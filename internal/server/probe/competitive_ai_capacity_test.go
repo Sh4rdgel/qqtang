@@ -36,7 +36,7 @@ func BenchmarkCompetitiveAIMultiRoomWorldStep(b *testing.B) {
 		Backend: battleai.DeploymentBackendONNXRuntime, ModelPath: modelPath,
 		MetadataPath: os.Getenv("QQTANG_TEST_ONNX_METADATA"), SharedLibraryPath: os.Getenv("QQTANG_TEST_ONNX_RUNTIME"),
 		IntraOpThreads: 1, InterOpThreads: 1,
-		NativePolicyConfig: battleai.NativePolicyConfig{
+		ActorPolicyConfig: battleai.ActorPolicyConfig{
 			DangerHorizonMS: 3500, DecisionMS: 100,
 			// Optional benchmark comparison using the production search settings.
 			EnableSearch: os.Getenv("QQTANG_TEST_AI_SEARCH") == "1",

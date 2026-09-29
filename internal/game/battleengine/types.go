@@ -116,19 +116,82 @@ type Cell struct {
 // simulation. Actor and flame traversal are deliberately independent because
 // the client's GridAttr stores them as separate flags.
 type Tile struct {
-	Kind               CellKind
-	FlamePassable      bool
-	MapElementOccupied bool
-	Durability         byte
-	MapElementID       uint32
-	NormalPushable     bool
-	PandaPushable      bool
+	Kind                    CellKind
+	FlamePassable           bool
+	NativeGridAttr          uint32
+	NativeGridAttrSet       bool
+	NativePlayerExitAttr    uint32
+	NativePlayerExitAttrSet bool
+	MapElementOccupied      bool
+	Durability              byte
+	MapElementID            uint32
+	NormalPushable          bool
+	PandaPushable           bool
 	// PushCounter is the native CMapElem +0x2c counter. Each valid contact
 	// pulse adds two; rule 1 confirms the move only after it exceeds 12.
 	PushCounter   byte
 	ElementWidth  byte
 	ElementHeight byte
 	ElementAnchor Cell
+}
+
+// PlayerPassable applies the native CMapElem+0x2c directional predicate.
+// Kind remains the any-direction summary for legacy/synthetic grids.
+func (tile Tile) PlayerPassable(direction Direction) bool {
+	if !tile.NativeGridAttrSet {
+		return tile.Kind == CellOpen
+	}
+	return tile.NativeGridAttr&nativeTraversalBit(direction) != 0
+}
+
+// PlayerExitPassable is the source-cell query in FUN_005cfc10: the
+// direction is ORed with 0x80 before calling CMapElem+0x2c.
+func (tile Tile) PlayerExitPassable(direction Direction) bool {
+	if tile.NativePlayerExitAttrSet {
+		return tile.NativePlayerExitAttr&nativeTraversalBit(oppositeDirection(direction)) != 0
+	}
+	return tile.PlayerPassable(oppositeDirection(direction))
+}
+
+// FlamePassableIn applies CMapElem+0x30. A ray queries its destination with
+// its travel direction and its previous cell with the reverse direction.
+func (tile Tile) FlamePassableIn(direction Direction) bool {
+	if !tile.NativeGridAttrSet {
+		return tile.FlamePassable
+	}
+	return tile.NativeGridAttr&(nativeTraversalBit(direction)<<8) != 0
+}
+
+func nativeTraversalBit(direction Direction) uint32 {
+	switch direction {
+	case DirectionRight:
+		return 8
+	case DirectionUp:
+		return 4
+	case DirectionLeft:
+		return 2
+	case DirectionDown:
+		return 1
+	case DirectionNone:
+		return 15
+	default:
+		return 0
+	}
+}
+
+func oppositeDirection(direction Direction) Direction {
+	switch direction {
+	case DirectionUp:
+		return DirectionDown
+	case DirectionRight:
+		return DirectionLeft
+	case DirectionDown:
+		return DirectionUp
+	case DirectionLeft:
+		return DirectionRight
+	default:
+		return DirectionNone
+	}
 }
 
 type Position struct {
@@ -183,15 +246,17 @@ func (grid Grid) validate() error {
 		if cell.Kind == CellBreakable && cell.Durability == 0 {
 			return fmt.Errorf("battle grid breakable cell %d has zero durability", index)
 		}
-		if cell.Kind != CellBreakable && cell.Durability != 0 {
-			return fmt.Errorf("battle grid non-breakable cell %d has durability %d", index, cell.Durability)
+		if cell.Durability != 0 && cell.Kind != CellBreakable && !(cell.Kind == CellOpen && cell.MapElementOccupied) {
+			return fmt.Errorf("battle grid non-destructible cell %d has durability %d", index, cell.Durability)
 		}
 		if cell.NormalPushable || cell.PandaPushable {
 			if cell.Kind == CellOpen || cell.MapElementID == 0 || cell.ElementWidth == 0 || cell.ElementHeight == 0 {
 				return fmt.Errorf("battle grid cell %d has invalid pushable metadata %+v", index, cell)
 			}
 		} else if cell.MapElementID != 0 || cell.ElementWidth != 0 || cell.ElementHeight != 0 || cell.ElementAnchor != (Cell{}) || cell.PushCounter != 0 {
-			return fmt.Errorf("battle grid cell %d has orphan map-element metadata %+v", index, cell)
+			if cell.Durability == 0 || !cell.MapElementOccupied || cell.MapElementID == 0 || cell.ElementWidth == 0 || cell.ElementHeight == 0 || cell.PushCounter != 0 {
+				return fmt.Errorf("battle grid cell %d has orphan map-element metadata %+v", index, cell)
+			}
 		}
 		if cell.PushCounter > NativeMapElementPushThreshold {
 			return fmt.Errorf("battle grid cell %d has invalid native push counter %d", index, cell.PushCounter)
@@ -280,6 +345,9 @@ type Rules struct {
 	// notification. Offline replay and RL leave this false and simulate the
 	// complete battle.
 	NativeOutcomeAuthority bool
+	// RecordItemEffects captures event-local before/after evidence only for
+	// diagnostic matches. It does not alter physics, visibility or rewards.
+	RecordItemEffects bool
 	// ActorHalfSizePixels defines the axis-aligned collision footprint around
 	// the actor centre. ConfigFromCompetitiveMap binds the native rule-1 value.
 	ActorHalfSizePixels uint16
@@ -305,6 +373,7 @@ type Config struct {
 	Rules                 Rules
 	Participants          []Participant
 	Pickups               []Pickup
+	ScheduledPickups      []NativeScheduledPickup
 	PublicWallItemProfile PublicWallItemProfile
 }
 
@@ -479,7 +548,11 @@ type Actor struct {
 	// Native 005ad322 retains the previous coordinate in actor +0x3a8/+0x3ac.
 	// 005f43b1 dispatches pickup/contact handlers only across that cell boundary.
 	nativePreviousPosition Position
-	moveRemainder          uint32
+	// A live FA5 has been produced, but its authoritative echo is pending.
+	// Keep the actor's outcome uncommitted while excluding local physics.
+	nativeHitPending  bool
+	nativeHumanMotion *nativeHumanMotion
+	moveRemainder     uint32
 }
 
 type Bomb struct {
@@ -670,11 +743,14 @@ const (
 )
 
 type Event struct {
-	Kind     EventKind
-	TimeMS   uint32
-	PlayerID uint16
-	TargetID uint16
-	BombID   uint32
+	// OpenedTraversal describes the pre-destruction terrain, not predicted
+	// value. Burning already walkable grass is not a new walking entrance.
+	OpenedTraversal bool
+	Kind            EventKind
+	TimeMS          uint32
+	PlayerID        uint16
+	TargetID        uint16
+	BombID          uint32
 	// Elimination metadata preserves the actual trapping source separately
 	// from PlayerID (the final killer). A victim's own bubble is not attributed
 	// to a nearby opponent or to the player who later finishes the victim.
@@ -701,6 +777,7 @@ type Event struct {
 	TransformationEnd TransformationEndReason
 	ActionID          uint8
 	ActionCount       uint8
+	ItemChange        *ItemStateChange `json:",omitempty"`
 	// Native 44/46 requests always carry a ray endpoint, including a miss.
 	// BombID alone cannot represent an empty endpoint.
 	ProjectileTargetCell Cell

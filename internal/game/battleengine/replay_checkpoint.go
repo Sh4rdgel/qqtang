@@ -62,6 +62,7 @@ func (engine *Engine) ApplyVerifiedMovementCheckpoint(playerID uint16, position 
 		}
 		actor.nativePreviousPosition = actor.Position
 		actor.Position = position
+		stopNativeHumanMovement(actor)
 		actor.moveRemainder = 0
 		return nil
 	}
@@ -227,6 +228,10 @@ func (engine *Engine) ApplyVerifiedPickupDispatch(dispatchTime uint32, dispatche
 	if engine == nil {
 		return fmt.Errorf("battle engine is nil")
 	}
+	// 005e24b6 truncates the combined immediate+delayed bird list to 64.
+	if len(dispatched) > NativePickupDispatchMaximum {
+		dispatched = dispatched[:NativePickupDispatchMaximum]
+	}
 	seen := make(map[Cell]struct{}, len(dispatched))
 	for index, pickup := range dispatched {
 		if pickup.SceneID == 0 {
@@ -248,7 +253,7 @@ func (engine *Engine) ApplyVerifiedPickupDispatch(dispatchTime uint32, dispatche
 		seen[pickup.Cell] = struct{}{}
 	}
 	for _, pickup := range dispatched {
-		engine.schedulePickupDispatch(dispatchTime, pickup)
+		engine.schedulePickupDispatch(dispatchTime, pickup, nil)
 	}
 	engine.activatePendingPickupDispatches()
 	return nil
@@ -286,10 +291,10 @@ func (engine *Engine) ApplyVerifiedItemDestruction(destroyed []Pickup) error {
 
 func (engine *Engine) applyVerifiedMapElementHit(hit VerifiedMapElementHit) (Event, []Cell, bool, error) {
 	tile, _ := engine.grid.Cell(hit.Cell)
-	if tile.Kind == CellOpen {
+	if tile.Kind == CellOpen && tile.Durability == 0 {
 		return Event{}, nil, false, nil
 	}
-	if tile.Kind != CellBreakable || tile.MapElementID != hit.MapElementID {
+	if tile.Durability == 0 || tile.MapElementID != hit.MapElementID {
 		// The native event remains authoritative even if an incomplete mirror
 		// lacks this map element. Do not fabricate geometry from an asset ID, but
 		// also do not reject the bomb and visible-item destruction facts that can

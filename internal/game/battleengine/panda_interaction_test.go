@@ -6,20 +6,17 @@ import (
 	"qqtang/internal/clientdata/sceneelement"
 )
 
-func TestPandaPushMovesWholeNativeElementAndHiddenPickupsOneCell(t *testing.T) {
+func TestPandaPushMovesSingleCellNativeElementAndHiddenPickup(t *testing.T) {
 	config := testConfig()
 	config.Rules.TickMS = NativeMapElementPushPulseMS
 	config.Participants[0].Spawn = Cell{Row: 2, Col: 1}
 	config.Participants[1].Spawn = Cell{Row: 0, Col: 4}
-	for col := int16(1); col <= 2; col++ {
-		config.Grid.Cells[1*int(config.Grid.Width)+int(col)] = Tile{
-			Kind: CellBreakable, Durability: 1, MapElementID: 9011, PandaPushable: true,
-			ElementWidth: 2, ElementHeight: 1, ElementAnchor: Cell{Row: 1, Col: 1},
-		}
+	config.Grid.Cells[1*int(config.Grid.Width)+1] = Tile{
+		Kind: CellBreakable, Durability: 1, MapElementID: 9011, PandaPushable: true,
+		ElementWidth: 1, ElementHeight: 1, ElementAnchor: Cell{Row: 1, Col: 1},
 	}
 	config.Pickups = []Pickup{
 		{SceneID: SceneBombCapacitySmall, Cell: Cell{Row: 1, Col: 1}, State: PickupHidden},
-		{SceneID: SceneBombPowerSmall, Cell: Cell{Row: 1, Col: 2}, State: PickupHidden},
 	}
 	engine := mustEngine(t, config)
 	engine.installTransformation(&engine.actors[0], mustNativeTransformation(t, 109))
@@ -38,12 +35,11 @@ func TestPandaPushMovesWholeNativeElementAndHiddenPickupsOneCell(t *testing.T) {
 	}
 	oldAnchor, _ := engine.grid.Cell(Cell{Row: 1, Col: 1})
 	newAnchor, _ := engine.grid.Cell(Cell{Row: 0, Col: 1})
-	newTail, _ := engine.grid.Cell(Cell{Row: 0, Col: 2})
-	if oldAnchor.Kind != CellOpen || !newAnchor.PandaPushable || !newTail.PandaPushable ||
-		newAnchor.MapElementID != 9011 || newTail.ElementAnchor != (Cell{Row: 0, Col: 1}) {
-		t.Fatalf("pushed grid old=%+v new=%+v/%+v", oldAnchor, newAnchor, newTail)
+	if oldAnchor.Kind != CellOpen || !newAnchor.PandaPushable ||
+		newAnchor.MapElementID != 9011 || newAnchor.ElementAnchor != (Cell{Row: 0, Col: 1}) {
+		t.Fatalf("pushed grid old=%+v new=%+v", oldAnchor, newAnchor)
 	}
-	if engine.pickups[0].Cell != (Cell{Row: 0, Col: 1}) || engine.pickups[1].Cell != (Cell{Row: 0, Col: 2}) {
+	if engine.pickups[0].Cell != (Cell{Row: 0, Col: 1}) {
 		t.Fatalf("hidden pickups did not follow element: %+v", engine.pickups)
 	}
 	if !hasEvent(events, EventMapElementMoved, 0) || engine.actors[0].Position.Y >= PositionAtCellCenter(Cell{Row: 2, Col: 1}).Y {
@@ -87,7 +83,7 @@ func TestNormalActorUsesCanMovePushPredicateAndNativeContactCounter(t *testing.T
 	}
 }
 
-func TestNormalActorCannotChargeTwoCellElementAlongItsOccupiedLongAxis(t *testing.T) {
+func TestNormalActorCannotMoveTwoCellElementEvenWithEmptyDestination(t *testing.T) {
 	config := testConfig()
 	config.Rules.TickMS = NativeMapElementPushPulseMS
 	config.Participants[1].Spawn = Cell{Row: 0, Col: 4}
@@ -98,15 +94,18 @@ func TestNormalActorCannotChargeTwoCellElementAlongItsOccupiedLongAxis(t *testin
 		}
 	}
 	engine := mustEngine(t, config)
-	engine.actors[0].Position = PositionAtCellCenter(Cell{Row: 1, Col: 1})
+	engine.actors[0].Position = PositionAtCellCenter(Cell{Row: 2, Col: 2})
 	for contact := 0; contact < 8; contact++ {
-		if _, err := engine.Step([]Action{{PlayerID: 1, Move: DirectionRight}}); err != nil {
+		if _, err := engine.Step([]Action{{PlayerID: 1, Move: DirectionUp}}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	anchor, _ := engine.grid.Cell(Cell{Row: 1, Col: 2})
 	if anchor.ElementAnchor != (Cell{Row: 1, Col: 2}) || anchor.PushCounter != 0 {
-		t.Fatalf("long-axis native producer gate was bypassed: %+v", anchor)
+		t.Fatalf("native map-manager size gate was bypassed: %+v", anchor)
+	}
+	if _, err := engine.ApplyVerifiedMapElementMovement(1, 9008, Cell{Row: 1, Col: 2}, DirectionUp); err == nil {
+		t.Fatal("native confirmation bypassed the map-manager size gate")
 	}
 }
 

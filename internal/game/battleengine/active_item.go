@@ -52,6 +52,7 @@ func (engine *Engine) useHeldActionAt(actorIndex int, actionID uint8, position P
 	if !canUseHeldAction(actor, actionID) {
 		return nil, false
 	}
+	change := engine.beginItemChange(actor)
 	if actor.State == ActorTrapped {
 		switch actionID {
 		case 63:
@@ -63,9 +64,10 @@ func (engine *Engine) useHeldActionAt(actorIndex int, actionID uint8, position P
 			return nil, false
 		}
 		consumeHeldAction(actor, actionID)
+		engine.finishItemChange(change, actor)
 		events := []Event{{
 			Kind: EventBattleActionUsed, TimeMS: engine.elapsedMS, PlayerID: actor.PlayerID,
-			Cell: actor.Position.Cell(), Position: actor.Position, ActionID: actionID,
+			Cell: actor.Position.Cell(), Position: actor.Position, ActionID: actionID, ItemChange: change,
 		}}
 		if actionID == 63 {
 			events = append(events, Event{
@@ -116,9 +118,10 @@ func (engine *Engine) useHeldActionAt(actorIndex int, actionID uint8, position P
 		return nil, false
 	}
 	consumeHeldAction(actor, actionID)
+	engine.finishItemChange(change, actor)
 	events = append(events, Event{
 		Kind: EventBattleActionUsed, TimeMS: engine.elapsedMS, PlayerID: actor.PlayerID,
-		BombID: targetBombID, Cell: position.Cell(), Position: position, ActionID: actionID,
+		BombID: targetBombID, Cell: position.Cell(), Position: position, ActionID: actionID, ItemChange: change,
 	})
 	return events, true
 }
@@ -199,7 +202,7 @@ func (engine *Engine) nativeActionProjectileTarget(actor *Actor) (Cell, uint32, 
 		tile, inside := engine.grid.Cell(cell)
 		// 00610631 -> 005d8c3c -> CMapElem+30 checks flame traversal on
 		// both sides of a transition, independently of player collision.
-		if !inside || !previous.FlamePassable || !tile.FlamePassable {
+		if !inside || !previous.FlamePassableIn(oppositeDirection(actor.Facing)) || !tile.FlamePassableIn(actor.Facing) {
 			break
 		}
 		last, reachable = cell, true
@@ -251,7 +254,7 @@ func (engine *Engine) resolveFieldObjectContacts() []Event {
 			// authority trace a field in (0,6) rejected contacts while the virtual
 			// actor's centre was still in (0,5), even though its footprint already
 			// overlapped the field cell.
-			if actor.State != ActorActive || actor.nativePreviousPosition.Cell() == actor.Position.Cell() || engine.actorHarmProtected(actor) || containsSortedPlayerID(object.PassableBy, actor.PlayerID) || actor.Position.Cell() != object.Cell {
+			if actor.State != ActorActive || actor.nativeHitPending || actor.nativePreviousPosition.Cell() == actor.Position.Cell() || engine.actorHarmProtected(actor) || containsSortedPlayerID(object.PassableBy, actor.PlayerID) || actor.Position.Cell() != object.Cell {
 				continue
 			}
 			// A real participant reports its own native contact. A virtual actor has
@@ -260,10 +263,12 @@ func (engine *Engine) resolveFieldObjectContacts() []Event {
 			if engine.rules.NativeOutcomeAuthority && actor.Source == ParticipantHuman {
 				continue
 			}
+			triggerIndex := len(events)
+			change := engine.beginItemChange(actor)
 			events = append(events, Event{
 				Kind: EventFieldObjectTriggered, TimeMS: engine.elapsedMS, PlayerID: object.OwnerID,
 				TargetID: actor.PlayerID, Cell: object.Cell, Position: actor.Position,
-				ActionID: object.ActionID, ObjectID: object.ID,
+				ActionID: object.ActionID, ObjectID: object.ID, ItemChange: change,
 			})
 			switch object.ActionID {
 			case 41:
@@ -312,6 +317,7 @@ func (engine *Engine) resolveFieldObjectContacts() []Event {
 				events = append(events, Event{Kind: EventMovementStatusStarted, TimeMS: engine.elapsedMS, PlayerID: actor.PlayerID, Cell: actor.Position.Cell(), Position: actor.Position, MovementStatus: MovementStatusSlow, EffectExpiresAt: actor.MovementStatusExpiresAt})
 				consumed = true
 			}
+			engine.finishItemChange(events[triggerIndex].ItemChange, actor)
 			break
 		}
 		if !consumed {
@@ -341,6 +347,15 @@ func (engine *Engine) ApplyVerifiedFieldObjectContact(playerID uint16, actionID 
 	if actor.State != ActorActive {
 		return nil, fmt.Errorf("verified field contact player %d is not active", playerID)
 	}
+	// FAD proves the bird's state-3 object has landed even when its unsent
+	// trajectory made the empirical live observation guard later.
+	for _, pending := range engine.pendingPickupDispatches {
+		if pending.Pickup.Cell == position.Cell() && pending.Pickup.SceneID == uint32(actionID) {
+			engine.installAuthoritativeFieldObject(actionID, position.Cell())
+			engine.retirePendingPickupDispatchesAtCell(position.Cell())
+			break
+		}
+	}
 	objectIndex := -1
 	for index := range engine.fieldObjects {
 		object := &engine.fieldObjects[index]
@@ -359,12 +374,14 @@ func (engine *Engine) ApplyVerifiedFieldObjectContact(playerID uint16, actionID 
 	if actionID == 43 {
 		status = MovementStatusSlow
 	}
+	change := engine.beginItemChange(actor)
 	engine.installMovementStatus(actor, status)
+	engine.finishItemChange(change, actor)
 	events := []Event{
 		{
 			Kind: EventFieldObjectTriggered, TimeMS: engine.elapsedMS,
 			PlayerID: object.OwnerID, TargetID: playerID, Cell: object.Cell,
-			Position: position, ActionID: object.ActionID, ObjectID: object.ID,
+			Position: position, ActionID: object.ActionID, ObjectID: object.ID, ItemChange: change,
 		},
 		{
 			Kind: EventMovementStatusStarted, TimeMS: engine.elapsedMS,

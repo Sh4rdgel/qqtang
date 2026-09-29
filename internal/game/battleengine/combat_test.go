@@ -52,6 +52,42 @@ func TestExplosionStopsAtSolidAndBreakableCellsAndChainsBombs(t *testing.T) {
 	}
 }
 
+func TestBombPlacedImmediatelyBeforeExplosionCanJoinSameTickChain(t *testing.T) {
+	config := testConfig()
+	config.Grid = testOpenGrid(7, 5)
+	config.Participants[0].Spawn = Cell{Row: 2, Col: 2}
+	config.Participants[0].BombCapacity = 3
+	config.Participants[0].MaxBombCapacity = 3
+	config.Participants[1].Spawn = Cell{Row: 4, Col: 6}
+	engine := mustEngine(t, config)
+	engine.elapsedMS = 100
+	engine.bombs = []Bomb{{
+		ID: 1, OwnerID: 2, Cell: Cell{Row: 2, Col: 0}, Power: 3, ExplodeAtMS: 100,
+	}}
+	engine.nextBombID = 2
+
+	events, err := engine.Step([]Action{{PlayerID: 1, PlaceBomb: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	placed := false
+	instantChain := false
+	for _, event := range events {
+		if event.Kind == EventBombPlaced && event.PlayerID == 1 && event.BombID == 2 {
+			placed = true
+		}
+		if event.Kind == EventBombExploded && event.PlayerID == 1 && event.BombID == 2 && event.TriggeredByBombID == 1 {
+			instantChain = true
+		}
+	}
+	if !placed || !instantChain {
+		t.Fatalf("late placement did not join the same-tick enemy chain: %+v", events)
+	}
+	if len(engine.bombs) != 0 {
+		t.Fatalf("same-tick chain left bombs behind: %+v", engine.bombs)
+	}
+}
+
 func TestTrapRescueOpponentFinishAndTerminal(t *testing.T) {
 	config := testConfig()
 	config.Participants = []Participant{
@@ -1140,20 +1176,57 @@ func TestNativePassActivationRequiresSuccessfulLocalPlacement(t *testing.T) {
 	}
 }
 
-func TestSameTickTrapExpiryUsesLiveSequentialSettlement(t *testing.T) {
+func TestSameDeadlineTrapExpirySettlesAllDeathsBeforeDraw(t *testing.T) {
 	engine := mustEngine(t, testConfig())
 	for index := range engine.actors {
 		engine.actors[index].State = ActorTrapped
 		engine.actors[index].TrapExpiresAt = engine.rules.TickMS
 	}
-	if _, err := engine.Step(nil); err != nil {
+	events, err := engine.Step(nil)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if outcome := engine.Terminal(); !outcome.Ended || outcome.Draw || outcome.WinnerTeamID != 2 {
-		t.Fatalf("same-tick sequential outcome = %+v", outcome)
+	if outcome := engine.Terminal(); !outcome.Ended || !outcome.Draw || outcome.WinnerTeamID != 0 {
+		t.Fatalf("same-deadline outcome = %+v", outcome)
 	}
-	if engine.actors[0].State != ActorEliminated || engine.actors[1].State == ActorEliminated {
-		t.Fatalf("settlement did not stop after the first decisive confirmation: %+v", engine.actors)
+	if engine.actors[0].State != ActorEliminated || engine.actors[1].State != ActorEliminated {
+		t.Fatalf("settlement omitted simultaneous deaths: %+v", engine.actors)
+	}
+	deaths, endings := 0, 0
+	for _, event := range events {
+		if event.Kind == EventActorEliminated {
+			deaths++
+		}
+		if event.Kind == EventMatchEnded {
+			endings++
+			if deaths != 2 {
+				t.Fatal("match ended before both simultaneous death events")
+			}
+		}
+	}
+	if endings != 1 {
+		t.Fatalf("terminal events = %d, want 1", endings)
+	}
+}
+
+func TestTrapExpiryPreservesDistinctDeadlinesWithinTick(t *testing.T) {
+	for _, earlier := range []int{0, 1} {
+		engine := mustEngine(t, testConfig())
+		for index := range engine.actors {
+			engine.actors[index].State = ActorTrapped
+			engine.actors[index].TrapExpiresAt = engine.rules.TickMS
+		}
+		engine.actors[earlier].TrapExpiresAt--
+		if _, err := engine.Step(nil); err != nil {
+			t.Fatal(err)
+		}
+		winner := &engine.actors[1-earlier]
+		if outcome := engine.Terminal(); !outcome.Ended || outcome.Draw || outcome.WinnerTeamID != winner.TeamID {
+			t.Fatalf("earlier actor %d: deadline order lost: %+v", earlier, outcome)
+		}
+		if engine.actors[earlier].State != ActorEliminated || winner.State != ActorTrapped {
+			t.Fatal("different deadlines were collapsed into a simultaneous tie")
+		}
 	}
 }
 

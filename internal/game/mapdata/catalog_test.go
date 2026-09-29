@@ -527,15 +527,25 @@ func TestParseCompetitiveBattlefieldUsesNativeGridAttributes(t *testing.T) {
 		1:  {Collision: CompetitiveCellBreakable, MapElementOccupied: true, Durability: 1, MapElementID: 10, NormalPushable: true, PandaPushable: true, ElementWidth: 1, ElementHeight: 1, ElementAnchorRow: 1, ElementAnchorCol: 1},
 		2:  {Collision: CompetitiveCellSolid, MapElementOccupied: true},
 		3:  {Collision: CompetitiveCellSolid, MapElementOccupied: true},
-		4:  {Collision: CompetitiveCellOpen, FlamePassable: true, MapElementOccupied: true},
-		5:  {Collision: CompetitiveCellOpen, FlamePassable: true, MapElementOccupied: true},
+		4:  {Collision: CompetitiveCellOpen, MapElementOccupied: true},
+		5:  {Collision: CompetitiveCellOpen, MapElementOccupied: true},
 		6:  {Collision: CompetitiveCellSolid, MapElementOccupied: true},
-		7:  {Collision: CompetitiveCellSolid, FlamePassable: true, MapElementOccupied: true},
+		7:  {Collision: CompetitiveCellOpen, MapElementOccupied: true},
 		8:  {Collision: CompetitiveCellOpen, MapElementOccupied: true},
 		9:  {Collision: CompetitiveCellBreakable, MapElementOccupied: true, Durability: 2, MapElementID: 11, PandaPushable: true, ElementWidth: 1, ElementHeight: 1, ElementAnchorRow: 1, ElementAnchorCol: 9},
 		10: {Collision: CompetitiveCellOpen, FlamePassable: true},
 	}
+	attrs := map[int]uint32{1: 0, 2: 0, 3: 0, 4: 5, 5: 5, 7: 4, 8: 1, 9: 0}
 	for col, expected := range want {
+		expected.NativePlayerExitAttrSet = true
+		expected.NativePlayerExitAttr = 15
+		if attr, exists := attrs[col]; exists {
+			expected.NativeGridAttr, expected.NativeGridAttrSet = attr, true
+			expected.NativePlayerExitAttr = attr
+		}
+		if col == 6 {
+			expected.NativePlayerExitAttr = 0
+		} // unknown positive first-layer object
 		got, ok := field.Cell(1, col)
 		if !ok || got != expected {
 			t.Fatalf("battlefield cell 1,%d = %+v/%t, want %+v", col, got, ok, expected)

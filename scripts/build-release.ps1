@@ -1,11 +1,29 @@
 ﻿[CmdletBinding()]
 param(
-    [string] $Name = 'QQTang-Local'
+    [string] $Name = 'QQTang-Local',
+    [string] $ModelPath = '',
+    [string] $ModelMetadataPath = '',
+    [string] $AIReleaseNotesPath = ''
 )
 
 $ErrorActionPreference = 'Stop'
 $packageName = $Name
 $workspace = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$selectedModel = if ($ModelPath) {
+	[IO.Path]::GetFullPath($ModelPath)
+} else {
+	Join-Path $workspace 'configs\models\qqtang-rule1.onnx'
+}
+$selectedModelMetadata = if ($ModelMetadataPath) {
+	[IO.Path]::GetFullPath($ModelMetadataPath)
+} else {
+	Join-Path $workspace 'configs\models\qqtang-rule1.onnx.json'
+}
+$selectedAIReleaseNotes = if ($AIReleaseNotesPath) {
+	[IO.Path]::GetFullPath($AIReleaseNotesPath)
+} else {
+	''
+}
 $releaseRoot = [IO.Path]::GetFullPath((Join-Path $workspace 'release'))
 $target = [IO.Path]::GetFullPath((Join-Path $releaseRoot $packageName))
 $baselineClient = [IO.Path]::GetFullPath((Join-Path $workspace 'client\original'))
@@ -114,8 +132,8 @@ $required = @(
 	(Join-Path $workspace 'configs\item-resource-manifest-overrides.json'),
 	(Join-Path $workspace 'configs\item-resource-variant-preferences.json'),
     (Join-Path $workspace 'configs\network.json'),
-	(Join-Path $workspace 'configs\models\qqtang-rule1.onnx'),
-	(Join-Path $workspace 'configs\models\qqtang-rule1.onnx.json'),
+	$selectedModel,
+	$selectedModelMetadata,
 	(Join-Path $workspace 'build-assets\onnxruntime\windows-amd64\onnxruntime.dll'),
 	(Join-Path $workspace 'build-assets\onnxruntime\windows-amd64\onnxruntime_providers_shared.dll'),
 	(Join-Path $workspace 'build-assets\onnxruntime\linux-amd64\libonnxruntime.so.1.29.0'),
@@ -150,6 +168,9 @@ $required = @(
 )
 foreach ($path in $required) {
     if (-not (Test-Path -LiteralPath $path)) { throw "Release dependency is missing: $path" }
+}
+if ($selectedAIReleaseNotes -and -not (Test-Path -LiteralPath $selectedAIReleaseNotes -PathType Leaf)) {
+	throw "AI release notes are missing: $selectedAIReleaseNotes"
 }
 
 if (Test-Path -LiteralPath $target) {
@@ -682,9 +703,12 @@ foreach ($architecture in @('amd64', 'arm64')) {
 	$linuxServerConfig | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $target "configs\server-directory-local-ui-linux-$architecture.json") -Encoding utf8
 }
 New-Item -ItemType Directory -Force -Path (Join-Path $target 'configs\models') | Out-Null
-Copy-Item -LiteralPath (Join-Path $workspace 'configs\models\qqtang-rule1.onnx') -Destination (Join-Path $target 'configs\models\qqtang-rule1.onnx') -Force
-Copy-Item -LiteralPath (Join-Path $workspace 'configs\models\qqtang-rule1.onnx.json') -Destination (Join-Path $target 'configs\models\qqtang-rule1.onnx.json') -Force
+Copy-Item -LiteralPath $selectedModel -Destination (Join-Path $target 'configs\models\qqtang-rule1.onnx') -Force
+Copy-Item -LiteralPath $selectedModelMetadata -Destination (Join-Path $target 'configs\models\qqtang-rule1.onnx.json') -Force
 Copy-Item -LiteralPath (Join-Path $workspace 'configs\models\README.md') -Destination (Join-Path $target 'configs\models\README.md') -Force
+if ($selectedAIReleaseNotes) {
+	Copy-Item -LiteralPath $selectedAIReleaseNotes -Destination (Join-Path $target 'AI-CANDIDATE.md') -Force
+}
 New-Item -ItemType Directory -Force -Path (Join-Path $target 'runtime\onnxruntime\windows-amd64') | Out-Null
 Copy-Item -LiteralPath (Join-Path $workspace 'build-assets\onnxruntime\windows-amd64\onnxruntime.dll') -Destination (Join-Path $target 'runtime\onnxruntime\windows-amd64\onnxruntime.dll') -Force
 Copy-Item -LiteralPath (Join-Path $workspace 'build-assets\onnxruntime\windows-amd64\onnxruntime_providers_shared.dll') -Destination (Join-Path $target 'runtime\onnxruntime\windows-amd64\onnxruntime_providers_shared.dll') -Force

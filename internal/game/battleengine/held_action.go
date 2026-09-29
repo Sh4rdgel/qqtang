@@ -1,5 +1,35 @@
 package battleengine
 
+// HeldActionGrantAmount is the public inventory consequence of a native grant.
+// Observation and mutation share it, including saturation and seven-slot limits.
+func HeldActionGrantAmount(slots [NativeBattleActionSlots]HeldActionSlot, actionID, count uint8) uint8 {
+	_, gain := heldActionGrantSlot(slots, actionID, count)
+	return gain
+}
+
+func heldActionGrantSlot(slots [NativeBattleActionSlots]HeldActionSlot, actionID, count uint8) (int, uint8) {
+	if actionID == 0 || count == 0 {
+		return -1, 0
+	}
+	empty := -1
+	for index, slot := range slots {
+		if slot.ActionID == actionID {
+			remaining := ^uint8(0) - slot.Count
+			if count > remaining {
+				return index, remaining
+			}
+			return index, count
+		}
+		if empty < 0 && slot.ActionID == 0 {
+			empty = index
+		}
+	}
+	if empty >= 0 {
+		return empty, count
+	}
+	return -1, 0
+}
+
 func actorHeldActionCount(actor *Actor, actionID uint8) uint8 {
 	if actor == nil || actionID == 0 {
 		return 0
@@ -19,25 +49,13 @@ func grantHeldAction(actor *Actor, actionID, count uint8) bool {
 	if actor == nil || actionID == 0 || count == 0 {
 		return false
 	}
-	for index := range actor.HeldActions {
-		slot := &actor.HeldActions[index]
-		if slot.ActionID != actionID {
-			continue
-		}
-		if count > ^uint8(0)-slot.Count {
-			slot.Count = ^uint8(0)
-		} else {
-			slot.Count += count
-		}
-		return true
+	index, gain := heldActionGrantSlot(actor.HeldActions, actionID, count)
+	if index < 0 {
+		return false
 	}
-	for index := range actor.HeldActions {
-		if actor.HeldActions[index].ActionID == 0 {
-			actor.HeldActions[index] = HeldActionSlot{ActionID: actionID, Count: count}
-			return true
-		}
-	}
-	return false
+	actor.HeldActions[index].ActionID = actionID
+	actor.HeldActions[index].Count += gain
+	return true
 }
 
 func consumeHeldAction(actor *Actor, actionID uint8) bool {
