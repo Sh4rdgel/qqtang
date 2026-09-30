@@ -128,14 +128,20 @@ func planCompetitiveAIFill(snapshot roomstate.Snapshot, selectedMap mapdata.Comp
 			teamSizes[teamID]++
 		}
 	} else {
-		virtualCount := len(humans)
-		if len(humans)+virtualCount > capacity {
+		// Fill both sides to the largest balanced match allowed by the open
+		// seats and map. An odd capacity leaves one seat unused; humans keep
+		// their chosen team and receive AI teammates where needed.
+		teamSize := capacity / 2
+		if len(humans) > teamSize {
 			return competitiveAIFillPlan{}, nil
 		}
 		colors := shuffledCompetitiveAIColors(&random, humanTeam)
-		teams = make([]byte, virtualCount)
-		for index := range teams {
-			teams[index] = colors[0]
+		teams = make([]byte, 0, teamSize*2-len(humans))
+		for count := len(humans); count < teamSize; count++ {
+			teams = append(teams, humanTeam)
+		}
+		for count := 0; count < teamSize; count++ {
+			teams = append(teams, colors[0])
 		}
 	}
 	plan := competitiveAIFillPlan{Participants: make([]match.CompetitiveParticipant, 0, len(teams))}

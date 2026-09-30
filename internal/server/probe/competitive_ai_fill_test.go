@@ -1,11 +1,15 @@
 package probe
 
 import (
+	"encoding/binary"
+	"io"
+	"path/filepath"
 	"testing"
 
 	"qqtang/internal/game/mapdata"
 	"qqtang/internal/game/match"
 	roomstate "qqtang/internal/game/room"
+	"qqtang/internal/protocol/game"
 )
 
 func TestCompetitiveAIRoomProjectionUsesFreeUnlockedSeatsAndCompleteIdentity(t *testing.T) {
@@ -39,7 +43,7 @@ func TestCompetitiveAIRoomProjectionUsesFreeUnlockedSeatsAndCompleteIdentity(t *
 	}
 }
 
-func TestPlanCompetitiveAIFillStandardMirrorsTheHumanTeamSize(t *testing.T) {
+func TestPlanCompetitiveAIFillStandardKeepsAFullHumanTeam(t *testing.T) {
 	entry := testCompetitiveAIMap(4)
 	snapshot := testCompetitiveAISnapshot(false, 4)
 	humans := []match.CompetitiveParticipant{
@@ -57,6 +61,169 @@ func TestPlanCompetitiveAIFillStandardMirrorsTheHumanTeamSize(t *testing.T) {
 		if participant.Source != match.CompetitiveParticipantVirtualAI || participant.PlayerID < competitiveAIFirstPlayerID || participant.RoleID == 0 {
 			t.Fatalf("invalid virtual participant %+v", participant)
 		}
+	}
+}
+
+func TestPlanCompetitiveAIFillStandardFillsBothTeamsToCapacity(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		openSeats  byte
+		mapLimit   byte
+		humanCount int
+		teamSize   int
+	}{
+		{"solo eight seats", 8, 8, 1, 4},
+		{"two humans eight seats", 8, 8, 2, 4},
+		{"three humans eight seats", 8, 8, 3, 4},
+		{"closed seats limit match", 6, 8, 1, 3},
+		{"map limits match", 8, 4, 1, 2},
+		{"odd open capacity", 7, 8, 2, 3},
+		{"odd map capacity", 8, 5, 1, 2},
+		{"two open seats", 2, 8, 1, 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			snapshot := testCompetitiveAISnapshot(false, test.openSeats)
+			humans := make([]match.CompetitiveParticipant, test.humanCount)
+			for index := range humans {
+				humans[index] = match.CompetitiveParticipant{PlayerID: uint16(index + 1), RoleID: 7, TeamID: 3}
+			}
+			plan, err := planCompetitiveAIFill(snapshot, testCompetitiveAIMap(test.mapLimit), humans, 77)
+			if err != nil {
+				t.Fatal(err)
+			}
+			counts := map[byte]int{3: test.humanCount}
+			for _, participant := range plan.Participants {
+				counts[participant.TeamID]++
+				if participant.Source != match.CompetitiveParticipantVirtualAI || participant.PlayerID < competitiveAIFirstPlayerID {
+					t.Fatalf("invalid virtual participant: %+v", participant)
+				}
+			}
+			if len(counts) != 2 {
+				t.Fatalf("filled teams = %v, want two teams", counts)
+			}
+			for teamID, count := range counts {
+				if count != test.teamSize {
+					t.Fatalf("team %d has %d players, want %d; roster=%+v", teamID, count, test.teamSize, plan.Participants)
+				}
+			}
+		})
+	}
+}
+
+func TestCompetitiveAIStandardCapacityFillHonorsScatteredClosedSeats(t *testing.T) {
+	snapshot := testCompetitiveAISnapshot(false, 8)
+	snapshot.LockedSeats[1], snapshot.LockedSeats[5] = true, true
+	snapshot.Members = []roomstate.Member{
+		{PlayerID: 1, RoleID: 7, TeamID: 3, SeatID: 1},
+		{PlayerID: 2, RoleID: 8, TeamID: 3, SeatID: 3},
+	}
+	humans := []match.CompetitiveParticipant{
+		{PlayerID: 1, RoleID: 7, TeamID: 3},
+		{PlayerID: 2, RoleID: 8, TeamID: 3},
+	}
+	plan, err := planCompetitiveAIFill(snapshot, testCompetitiveAIMap(8), humans, 77)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projections, err := buildCompetitiveAIRoomProjections(snapshot, plan.Participants)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projections) != 4 {
+		t.Fatalf("projected AI count = %d, want four for 3v3", len(projections))
+	}
+	for index, seatID := range []byte{4, 5, 7, 8} {
+		if projections[index].SeatID != seatID || projections[index].TeamID != plan.Participants[index].TeamID {
+			t.Fatalf("AI projection %d = %+v, want open seat %d and planned team", index, projections[index], seatID)
+		}
+	}
+}
+
+func TestCompetitiveAIStandardStartProjectsTheCapacityRoster(t *testing.T) {
+	catalog, err := mapdata.LoadCatalog(filepath.Join("..", "..", "..", "runtime", "client-patched"))
+	if err != nil {
+		t.Skipf("verified runtime client is unavailable: %v", err)
+	}
+	for _, test := range []struct {
+		name        string
+		selection   roomstate.MapSelection
+		closedSeats []byte
+		wantPlayers int
+	}{
+		{"fixed eight seats", roomstate.FixedMapSelection(905), nil, 8},
+		{"fixed six seats", roomstate.FixedMapSelection(905), []byte{2, 6}, 6},
+		{"random eight seats", roomstate.RandomMapSelection(), nil, 8},
+		{"random odd capacity", roomstate.RandomMapSelection(), []byte{8}, 6},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := &Server{
+				mapCatalog: catalog, logWriter: io.Discard,
+				config:              Config{CompetitiveAI: CompetitiveAIConfig{Enabled: true}},
+				competitiveAIPolicy: &competitiveAIActorPolicyFactoryProbe{},
+				battles:             make(map[uint32]*match.AdventureBattle), competitiveBattles: make(map[uint32]*match.CompetitiveBattle),
+			}
+			profile := game.DefaultPlayerProfile()
+			profile.GameInfo.RoleID = 7
+			profile.GameInfo.Point = ^uint32(0)
+			profile.Inventory = []game.ItemInfo{game.NewPermanentItemInfo(game.CompetitiveAICardItemID, 1)}
+			owner := &connectionSession{UIN: 1_000_001, Profile: profile}
+			if err := server.createSessionRoom(owner, 1, byte(roomstate.GameTypeCompetitiveNoItem)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := server.worldState().UpdateMatchSettings(sessionWorldUIN(owner), roomstate.MatchSettings{
+				Map: test.selection, GameType: roomstate.GameTypeCompetitiveNoItem,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			room, err := server.sessionRoom(owner)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, seatID := range test.closedSeats {
+				if _, err := room.SetSeatLocked(owner.Profile.PlayerID, seatID, true); err != nil {
+					t.Fatal(err)
+				}
+			}
+			payload := make([]byte, 8)
+			binary.BigEndian.PutUint32(payload[:4], owner.UIN)
+			binary.BigEndian.PutUint32(payload[4:], uint32(owner.RoomID))
+			request := testLocalRoutedPacketWithPayload(t, game.StartGameCommand, 3, 0xffff, 1, owner.UIN, payload)
+			prepared, err := server.prepareCompetitiveRoomMatchStart(owner, request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			packet, err := game.InspectLocalPacket(prepared.followUp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			begin, err := game.ParseLengthPrefixedGameBeginDataNetwork(packet.Payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(begin.Players) != test.wantPlayers {
+				t.Fatalf("map %d GAME_BEGIN has %d players, want %d", begin.MapID, len(begin.Players), test.wantPlayers)
+			}
+			counts := make(map[byte]int)
+			for _, player := range begin.Players {
+				counts[player.TeamID]++
+			}
+			if len(counts) != 2 {
+				t.Fatalf("GAME_BEGIN teams = %v, want two", counts)
+			}
+			for teamID, count := range counts {
+				if count != test.wantPlayers/2 {
+					t.Fatalf("GAME_BEGIN team %d has %d players, want %d", teamID, count, test.wantPlayers/2)
+				}
+			}
+			if prepared.competitiveAI == nil || len(prepared.competitiveAI.roomProjections) != test.wantPlayers-1 {
+				t.Fatalf("runtime is missing the projected AI roster: %+v", prepared.competitiveAI)
+			}
+			for _, projection := range prepared.competitiveAI.roomProjections {
+				if room.Snapshot().LockedSeats[projection.SeatID-1] {
+					t.Fatalf("AI occupied closed seat %d", projection.SeatID)
+				}
+			}
+		})
 	}
 }
 

@@ -377,7 +377,10 @@ func (server *Server) prepareCompetitiveRoomMatchStart(session *connectionSessio
 				}
 			}
 			if singleTeam && len(participants)*2 <= int(roomSnapshot.Capacity()) {
-				mapParticipantCount = len(participants) * 2
+				// Standard AI rooms fill both teams up to the open-seat limit.
+				// Select a map for that final even roster, not just the humans
+				// and an equally sized opposing team.
+				mapParticipantCount = int(roomSnapshot.Capacity()) / 2 * 2
 			}
 		}
 	}
